@@ -1,0 +1,4 @@
+<Solution>
+    <Project Path="Meridian.Brighter.Postgres/Meridian.Brighter.Postgres.csproj" />
+    <Project Path="Meridian.Brighter.Postgres.Tests/Meridian.Brighter.Postgres.Tests.csproj" />
+</Solution>

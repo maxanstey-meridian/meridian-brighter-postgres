@@ -2,7 +2,7 @@
     <PropertyGroup>
         <RootNamespace>Meridian.Brighter.Postgres</RootNamespace>
         <PackageId>Meridian.Brighter.Postgres</PackageId>
-        <Version>0.1.0</Version>
+        <Version>0.1.1</Version>
         <Authors>Max Anstey</Authors>
         <Description>Fixes and additions for running Paramore Brighter on PostgreSQL: a distributed lock that works across replicas, an outbox sweeper that survives failed sweeps, dead-letter re-drive and retention per message type, and inbox cleanup.</Description>
         <PackageLicenseExpression>MIT</PackageLicenseExpression>

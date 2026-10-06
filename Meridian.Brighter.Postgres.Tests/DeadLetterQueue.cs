@@ -152,7 +152,7 @@ internal sealed class DeadLetterQueue
         using var consumer = Consumer(subscriptions[typeof(T)]);
         var messages = consumer
             .Receive(TimeSpan.FromMilliseconds(500))
-            .Where(message => message.Header.MessageType != MessageType.MT_NONE)
+            .Where(message => !message.IsEmpty)
             .ToList();
         return messages.SingleOrDefault();
     }
@@ -177,7 +177,5 @@ internal sealed class DeadLetterQueue
         );
 
     private static Message Receive(IAmAMessageConsumerSync consumer) =>
-        consumer
-            .Receive(TimeSpan.FromSeconds(1))
-            .Single(message => message.Header.MessageType != MessageType.MT_NONE);
+        consumer.Receive(TimeSpan.FromSeconds(1)).Single(message => !message.IsEmpty);
 }

@@ -34,26 +34,30 @@ public static class BrighterBuilderExtensions
     /// Runs an outbox sweeper that logs a failed sweep and backs off, instead of Brighter's
     /// <c>UseOutboxSweeper</c>, which can end the process when a sweep fails. Use one or the other.
     /// Only one process sweeps at a time, as long as the registered distributed lock works across
-    /// processes (see <see cref="UsePostgresAdvisoryLock"/>).
+    /// processes (see <see cref="UsePostgresAdvisoryLock"/>). Call it once.
     /// </summary>
     public static IBrighterBuilder UseResilientOutboxSweeper(
         this IBrighterBuilder brighter,
         Action<ResilientOutboxSweeperOptions>? configure = null
     )
     {
+        if (
+            brighter.Services.Any(descriptor =>
+                descriptor.ServiceType == typeof(ResilientOutboxSweeperOptions)
+            )
+        )
+        {
+            throw new InvalidOperationException(
+                $"{nameof(UseResilientOutboxSweeper)} has already been called."
+            );
+        }
+
         var options = new ResilientOutboxSweeperOptions();
         configure?.Invoke(options);
-        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(options.Interval, TimeSpan.Zero);
-        ArgumentOutOfRangeException.ThrowIfLessThan(options.MinimumMessageAge, TimeSpan.Zero);
-        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(options.BatchSize, 0);
-        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(options.MaximumBackoff, TimeSpan.Zero);
+        options.Validate();
 
-        brighter.Services.AddHostedService(provider => new ResilientOutboxSweeper(
-            provider.GetRequiredService<IAmAnOutboxProducerMediator>(),
-            provider.GetRequiredService<IDistributedLock>(),
-            options,
-            provider.GetRequiredService<ILogger<ResilientOutboxSweeper>>()
-        ));
+        brighter.Services.AddSingleton(options);
+        brighter.Services.AddHostedService<ResilientOutboxSweeper>();
         return brighter;
     }
 
@@ -61,7 +65,7 @@ public static class BrighterBuilderExtensions
     /// Applies a dead-letter policy per message type on Brighter's PostgreSQL transport: re-drive
     /// some, expire others, and keep the rest. Each type needs one PostgreSQL subscription with a
     /// dead-letter routing key. Pass the configuration the transport's connection uses, so the
-    /// queue table, schema and payload type match.
+    /// queue table, schema and payload type match. Each call runs its own service.
     /// </summary>
     public static IBrighterBuilder UsePostgresDeadLetters(
         this IBrighterBuilder brighter,
@@ -72,9 +76,9 @@ public static class BrighterBuilderExtensions
         ArgumentNullException.ThrowIfNull(gateway);
         var options = new PostgresDeadLetterOptions();
         configure(options);
-        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(options.Interval, TimeSpan.Zero);
+        options.Validate();
 
-        brighter.Services.AddHostedService(provider => new PostgresDeadLetterService(
+        brighter.Services.AddSingleton<IHostedService>(provider => new PostgresDeadLetterService(
             gateway,
             provider.GetRequiredService<IAmConsumerOptions>(),
             options,
@@ -85,7 +89,7 @@ public static class BrighterBuilderExtensions
 
     /// <summary>
     /// Deletes inbox rows past their retention, which Brighter never does. Pass the configuration
-    /// the inbox uses, so the table and schema match.
+    /// the inbox uses, so the table and schema match. Each call cleans the inbox it is given.
     /// </summary>
     public static IBrighterBuilder UsePostgresInboxCleanup(
         this IBrighterBuilder brighter,
@@ -96,11 +100,9 @@ public static class BrighterBuilderExtensions
         ArgumentNullException.ThrowIfNull(inbox);
         var options = new PostgresInboxCleanupOptions();
         configure?.Invoke(options);
-        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(options.RetainFor, TimeSpan.Zero);
-        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(options.Interval, TimeSpan.Zero);
-        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(options.BatchSize, 0);
+        options.Validate();
 
-        brighter.Services.AddHostedService(provider => new PostgresInboxCleaner(
+        brighter.Services.AddSingleton<IHostedService>(provider => new PostgresInboxCleaner(
             inbox,
             options,
             provider.GetRequiredService<ILogger<PostgresInboxCleaner>>()

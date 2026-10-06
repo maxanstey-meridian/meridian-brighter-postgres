@@ -10,7 +10,7 @@ It sits beside stock Brighter rather than forking it. Each piece replaces or add
 Brighter through the extension points Brighter already has, and is deleted from this package once
 Brighter fixes the problem upstream.
 
-Requires .NET 10 and Brighter 10.7 or later.
+Requires .NET 10 and Brighter 10.8 or later.
 
 ## What's included
 
@@ -34,11 +34,11 @@ can choose newer ones:
 
 | Package                                            | Minimum |
 | -------------------------------------------------- | ------- |
-| `Paramore.Brighter`                                | 10.7.0  |
-| `Paramore.Brighter.Extensions.DependencyInjection` | 10.7.0  |
-| `Paramore.Brighter.MessagingGateway.Postgres`      | 10.7.0  |
+| `Paramore.Brighter`                                | 10.8.0  |
+| `Paramore.Brighter.Extensions.DependencyInjection` | 10.8.0  |
+| `Paramore.Brighter.MessagingGateway.Postgres`      | 10.8.0  |
 | `DistributedLock.Postgres`                         | 1.3.1   |
-| `Microsoft.Extensions.Hosting.Abstractions`        | 10.0.10 |
+| `Microsoft.Extensions.Hosting.Abstractions`        | 10.0.12 |
 
 The rest of your Brighter setup, and its packages, stay as they are. `AddConsumers` comes from
 `Paramore.Brighter.ServiceActivator.Extensions.DependencyInjection`, and the outbox and inbox from
@@ -108,13 +108,20 @@ Each extension relies on part of Brighter being registered:
 | `UsePostgresInboxCleanup`   | Only the inbox's configuration                                                  |
 
 The sweeper, the dead-letter policies and the inbox cleanup are hosted services. Each runs its
-first pass as soon as the host starts, then one every `Interval`.
+first pass as soon as the host starts, then one every `Interval`. Register the sweeper once; each
+`UsePostgresDeadLetters` or `UsePostgresInboxCleanup` call runs a service of its own, so an app
+with two inboxes calls `UsePostgresInboxCleanup` for each.
 
 Bad settings fail early. An out-of-range interval, age or batch size throws
-`ArgumentOutOfRangeException` from the `Use…` call itself, and a second policy for the same type
-throws `InvalidOperationException` there too. Problems that depend on the rest of the container,
-such as a policy type without exactly one subscription or a table name that isn't a plain
-identifier, throw `InvalidOperationException` when the host starts.
+`ArgumentOutOfRangeException` from the `Use…` call itself. Intervals and `MaximumBackoff` can't be
+longer than about 49 days, the longest wait `Task.Delay` accepts. A second policy for the same
+type, or a second `UseResilientOutboxSweeper` call, throws `InvalidOperationException` there too.
+Problems that depend on the rest of the container throw `InvalidOperationException` when the host
+starts:
+
+- a policy type without exactly one subscription;
+- a table name that isn't a plain identifier;
+- `UseBulk` with a producer that has no bulk API.
 
 ### Advisory lock
 
@@ -138,6 +145,18 @@ it only one replica sweeps or archives at a time.
 `UseResilientOutboxSweeper` replaces Brighter's `UseOutboxSweeper` (from
 `Paramore.Brighter.Outbox.Hosting`). Register one or the other, not both.
 
+The sweeper is registered as the hosted service `ResilientOutboxSweeper`, by type, as Brighter
+registers `TimedOutboxSweeper`. A test host that shouldn't dispatch can remove it the same way:
+
+```csharp
+foreach (var sweeper in services
+    .Where(descriptor => descriptor.ImplementationType == typeof(ResilientOutboxSweeper))
+    .ToList())
+{
+    services.Remove(sweeper);
+}
+```
+
 Every `Interval` it takes the `OutboxSweeper` lock and dispatches up to `BatchSize` outstanding
 messages that are at least `MinimumMessageAge` old. That is the resource Brighter's own sweeper
 locks, so replicas part-way through a move from `UseOutboxSweeper` still don't sweep at once. If
@@ -148,14 +167,19 @@ A failed sweep is logged as an error and the sweeper backs off: the wait doubles
 consecutive failure, up to `MaximumBackoff` (but never below `Interval`), and goes back to
 `Interval` after a sweep succeeds. With the defaults that is 10 s, 20 s, 40 s, then 60 s.
 
-| Option              | Default  | Meaning                                             |
-| ------------------- | -------- | --------------------------------------------------- |
-| `Interval`          | 5 s      | Wait between sweeps                                 |
-| `MinimumMessageAge` | 5 s      | How old an undispatched message must be to be swept |
-| `BatchSize`         | 100      | Most messages one sweep sends                       |
-| `MaximumBackoff`    | 1 minute | Longest wait after consecutive failures             |
+| Option              | Default  | Meaning                                                                                     |
+| ------------------- | -------- | ------------------------------------------------------------------------------------------- |
+| `Interval`          | 5 s      | Wait between sweeps                                                                         |
+| `MinimumMessageAge` | 5 s      | How old an undispatched message must be to be swept                                         |
+| `BatchSize`         | 100      | Most messages one sweep sends                                                               |
+| `MaximumBackoff`    | 1 minute | Longest wait after consecutive failures                                                     |
+| `UseBulk`           | `false`  | Send each sweep's messages through the producer's bulk API (`IAmABulkMessageProducerAsync`) |
 
-The first three defaults match Brighter's `TimedOutboxSweeperOptions`.
+Apart from `MaximumBackoff`, which Brighter doesn't have, the defaults match Brighter's
+`TimedOutboxSweeperOptions`.
+
+`UseBulk` needs every producer in the registry to have a bulk API, or the sweeper refuses to
+start. Brighter's PostgreSQL producer has none, so an app on that transport leaves it off.
 
 ### Dead-letter policies
 
@@ -221,6 +245,15 @@ row has gone is handled again, so keep it well past the longest time a message c
 | `Interval`  | 1 hour  | Wait between passes                           |
 | `BatchSize` | 1000    | Most rows one delete removes                  |
 
+Brighter's inbox table has no index on `timestamp`, so without one every pass reads the whole
+table to find the rows past retention, even when there are none. On a million-row inbox that is
+about 350 MB of reads a pass; with the index it is three pages. Add it in your migrations (the
+package creates no schema objects):
+
+```sql
+CREATE INDEX IF NOT EXISTS brighter_inbox_timestamp ON "brighter_inbox" ("timestamp");
+```
+
 ### When a pass fails
 
 Every background pass logs a failure and tries again; none of them can end the process. The
@@ -235,7 +268,7 @@ components own, and names them the way those components do:
 | Table                 | Created by                                                                                            | Used by                   | Columns used                           |
 | --------------------- | ----------------------------------------------------------------------------------------------------- | ------------------------- | -------------------------------------- |
 | Transport queue table | Brighter's transport, when a subscription's `makeChannels` is `OnMissingChannel.Create` (the default) | Dead-letter policies      | `queue`, `visible_timeout`, `content`  |
-| Inbox table           | Your app, as now (the tests use `PostgreSqlInboxBuilder.GetDDL`)                                      | Inbox cleanup             | `commandid`, `contextkey`, `timestamp` |
+| Inbox table           | Your app, as now (the tests use `PostgreSqlInboxBuilder.GetDDL`), plus an index on `timestamp`        | Inbox cleanup             | `commandid`, `contextkey`, `timestamp` |
 | Outbox table          | Your app, as now (the tests use `PostgreSqlOutboxBuilder.GetDDL`)                                     | Brighter, via the sweeper | None directly                          |
 
 - The queue table is `"{schema}"."{table}"`, quoted as given, with schema `public` unless the
@@ -334,7 +367,8 @@ dotnet csharpier format .
 The build is strict. `Directory.Build.props` turns warnings into errors and enforces code style
 in the build. The public API is tracked by the PublicApiAnalyzers: a public symbol missing from
 `PublicAPI.Unshipped.txt` (RS0016), or one listed there but removed (RS0017), fails the build. The
-public surface is the four `Use…` extensions and their three options classes; everything else is
+public surface is the four `Use…` extensions, their three options classes, and the hosted
+services `ResilientOutboxSweeper` and `PostgresInboxCleaner`, which apps name; everything else is
 `internal`, and visible to the tests through `InternalsVisibleTo`.
 
 ### Layout
@@ -346,7 +380,7 @@ Meridian.Brighter.Postgres/
   ResilientOutboxSweeper.cs      The outbox sweeper
   PostgresDeadLetterService.cs   Dead-letter policies, and their SQL
   PostgresInboxCleaner.cs        Inbox cleanup, and its SQL
-  PeriodicService.cs             The shared loop: run a pass, log a failure, back off
+  PeriodicLoop.cs                The shared loop: run a pass, log a failure, back off
   PostgresIdentifier.cs          The plain-identifier check for table and schema names
   *Options.cs                    Public options
   PublicAPI.*.txt                The public API baseline
@@ -394,6 +428,9 @@ then:
 3. Packs the package
 4. Restores the packed package into a new class library and builds it
 5. Pushes it to nuget.org with the `NUGET_API_KEY` repository secret
+
+Once it is published, move the entries in `PublicAPI.Unshipped.txt` to `PublicAPI.Shipped.txt` and
+commit that, so the analyzers tell the released API from later additions.
 
 This README is packed as the package's readme and shown on nuget.org, which is why its links are
 absolute.

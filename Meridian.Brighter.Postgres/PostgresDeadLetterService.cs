@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using Paramore.Brighter;
@@ -9,6 +10,7 @@ namespace Meridian.Brighter.Postgres;
 /// Applies each message type's dead-letter policy. Brighter's PostgreSQL transport has no re-drive
 /// or retention of its own, so this works on the queue table directly. The queue each policy acts
 /// on comes from the type's subscription, so apps state policy per message type, not per queue.
+/// Register it with <see cref="BrighterBuilderExtensions.UsePostgresDeadLetters"/>.
 /// </summary>
 /// <remarks>
 /// Brighter writes dead letters to the gateway configuration's queue table, even for a
@@ -17,47 +19,54 @@ namespace Meridian.Brighter.Postgres;
 /// <c>originalTopic</c> Brighter stamps on a rejected message. Ages are measured with <c>CURRENT_TIMESTAMP</c>, because
 /// Brighter stamps <c>visible_timeout</c> with the database clock, not the app's.
 /// </remarks>
-internal sealed class PostgresDeadLetterService : PeriodicService
+internal sealed class PostgresDeadLetterService : BackgroundService
 {
     /// <summary>Removes the header bag keys Brighter stamps on a rejected message.</summary>
     private static readonly string StripRejectionMetadata = string.Concat(
         new[]
         {
-            "originalTopic",
-            "originalMessageType",
-            "rejectionReason",
-            "rejectionMessage",
-            "rejectionTimestamp",
+            RejectionMetadataKeyNames.OriginalTopic,
+            RejectionMetadataKeyNames.OriginalMessageType,
+            RejectionMetadataKeyNames.RejectionReason,
+            RejectionMetadataKeyNames.RejectionMessage,
+            RejectionMetadataKeyNames.RejectionTimestamp,
         }.Select(key => $" #- '{{header,bag,{key}}}'")
     );
 
-    private const string OriginalTopic =
-        """("content"::jsonb -> 'header' -> 'bag' ->> 'originalTopic')""";
+    private static readonly string OriginalTopic =
+        $"""("content"::jsonb -> 'header' -> 'bag' ->> '{RejectionMetadataKeyNames.OriginalTopic}')""";
     private const string CreatedAt =
         """("content"::jsonb -> 'header' ->> 'timeStamp')::timestamptz""";
 
     private readonly string connectionString;
     private readonly IReadOnlyList<DeadLetterQueue> queues;
     private readonly ILogger<PostgresDeadLetterService> logger;
+    private readonly PeriodicLoop loop;
 
-    public PostgresDeadLetterService(
+    internal PostgresDeadLetterService(
         IAmARelationalDatabaseConfiguration gateway,
         IAmConsumerOptions consumers,
         PostgresDeadLetterOptions options,
         ILogger<PostgresDeadLetterService> logger
     )
-        : base(options.Interval, options.Interval, logger)
     {
         connectionString = gateway.ConnectionString;
         queues = options
             .Policies.Select(policy => Resolve(policy.Key, policy.Value, gateway, consumers))
             .ToList();
         this.logger = logger;
+        loop = new PeriodicLoop(
+            options.Interval,
+            options.Interval,
+            "apply dead-letter policies",
+            logger
+        );
     }
 
-    protected override string Activity => "apply dead-letter policies";
+    protected override Task ExecuteAsync(CancellationToken stoppingToken) =>
+        loop.RunAsync(RunOnceAsync, stoppingToken);
 
-    public override async Task RunOnceAsync(CancellationToken cancellationToken)
+    internal async Task RunOnceAsync(CancellationToken cancellationToken)
     {
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);

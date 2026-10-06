@@ -1,25 +1,25 @@
 <Project>
     <ItemGroup>
         <!-- Library: the lowest versions it supports, so consumers choose their own. -->
-        <PackageVersion Include="Paramore.Brighter" Version="10.7.0" />
+        <PackageVersion Include="Paramore.Brighter" Version="10.8.0" />
         <PackageVersion
             Include="Paramore.Brighter.Extensions.DependencyInjection"
-            Version="10.7.0"
+            Version="10.8.0"
         />
-        <PackageVersion Include="Paramore.Brighter.MessagingGateway.Postgres" Version="10.7.0" />
+        <PackageVersion Include="Paramore.Brighter.MessagingGateway.Postgres" Version="10.8.0" />
         <PackageVersion Include="DistributedLock.Postgres" Version="1.3.1" />
-        <PackageVersion Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.10" />
+        <PackageVersion Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.12" />
         <!-- Build-time analyzers (PrivateAssets=all; not shipped in the package) -->
         <PackageVersion Include="Microsoft.CodeAnalysis.PublicApiAnalyzers" Version="4.14.0" />
         <!-- Test -->
-        <PackageVersion Include="Paramore.Brighter.Outbox.PostgreSql" Version="10.7.0" />
-        <PackageVersion Include="Paramore.Brighter.PostgreSql" Version="10.7.0" />
-        <PackageVersion Include="Paramore.Brighter.Inbox.Postgres" Version="10.7.0" />
+        <PackageVersion Include="Paramore.Brighter.Outbox.PostgreSql" Version="10.8.0" />
+        <PackageVersion Include="Paramore.Brighter.PostgreSql" Version="10.8.0" />
+        <PackageVersion Include="Paramore.Brighter.Inbox.Postgres" Version="10.8.0" />
         <PackageVersion
             Include="Paramore.Brighter.ServiceActivator.Extensions.DependencyInjection"
-            Version="10.7.0"
+            Version="10.8.0"
         />
-        <PackageVersion Include="Microsoft.Extensions.Hosting" Version="10.0.10" />
+        <PackageVersion Include="Microsoft.Extensions.Hosting" Version="10.0.12" />
         <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.8.1" />
         <PackageVersion Include="Testcontainers.PostgreSql" Version="4.14.0" />
         <PackageVersion Include="xunit" Version="2.9.3" />

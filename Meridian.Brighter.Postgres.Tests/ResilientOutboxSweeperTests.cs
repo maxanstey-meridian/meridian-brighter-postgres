@@ -1,5 +1,8 @@
 using Medallion.Threading.Postgres;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Paramore.Brighter.Extensions.DependencyInjection;
 
 namespace Meridian.Brighter.Postgres.Tests;
 
@@ -7,7 +10,7 @@ namespace Meridian.Brighter.Postgres.Tests;
 public sealed class ResilientOutboxSweeperTests(PostgresFixture postgres)
 {
     [Fact]
-    public async Task ASweepDispatchesDepositedMessages()
+    public async Task ASweepDispatchesDepositedMessagesOneAtATime()
     {
         await using var host = await CreateHostAsync();
         var messageId = await host.DepositAsync();
@@ -16,6 +19,7 @@ public sealed class ResilientOutboxSweeperTests(PostgresFixture postgres)
 
         Assert.NotNull(await host.DispatchedAtAsync(messageId));
         Assert.Single(host.Bus.Stream(BrighterHost.Topic));
+        Assert.Equal(0, host.BatchesSent);
     }
 
     [Fact]
@@ -75,12 +79,69 @@ public sealed class ResilientOutboxSweeperTests(PostgresFixture postgres)
     ) =>
         Assert.Equal(
             TimeSpan.FromSeconds(expectedSeconds),
-            PeriodicService.Backoff(
+            PeriodicLoop.Backoff(
                 TimeSpan.FromSeconds(intervalSeconds),
                 TimeSpan.FromMinutes(1),
                 failures
             )
         );
+
+    [Fact]
+    public async Task UseBulkSendsThroughTheProducersBulkApi()
+    {
+        await using var host = await BrighterHost.CreateAsync(
+            postgres.ConnectionString,
+            brighter =>
+                brighter.UseResilientOutboxSweeper(options =>
+                {
+                    options.MinimumMessageAge = TimeSpan.Zero;
+                    options.UseBulk = true;
+                })
+        );
+        var messageId = await host.DepositAsync();
+
+        Assert.True(await host.Sweeper.SweepAsync(CancellationToken.None));
+
+        Assert.NotNull(await host.DispatchedAtAsync(messageId));
+        Assert.Equal(1, host.BatchesSent);
+    }
+
+    [Fact]
+    public async Task UseBulkIsRefusedWhenAProducerHasNoBulkApi()
+    {
+        await using var host = await BrighterHost.CreateAsync(
+            postgres.ConnectionString,
+            brighter => brighter.UseResilientOutboxSweeper(options => options.UseBulk = true),
+            bulkProducer: false
+        );
+
+        var error = Assert.Throws<InvalidOperationException>(() => host.Sweeper);
+
+        Assert.Contains(BrighterHost.Topic.Value, error.Message);
+    }
+
+    [Fact]
+    public void TheSweeperCanOnlyBeRegisteredOnce()
+    {
+        var brighter = new ServiceCollection().AddBrighter().UseResilientOutboxSweeper();
+
+        Assert.Throws<InvalidOperationException>(() => brighter.UseResilientOutboxSweeper());
+    }
+
+    [Fact]
+    public void TheSweeperIsRegisteredByTypeSoAHostCanRemoveIt()
+    {
+        var services = new ServiceCollection();
+
+        services.AddBrighter().UseResilientOutboxSweeper();
+
+        Assert.Single(
+            services,
+            descriptor =>
+                descriptor.ServiceType == typeof(IHostedService)
+                && descriptor.ImplementationType == typeof(ResilientOutboxSweeper)
+        );
+    }
 
     [Fact]
     public async Task InvalidSettingsAreRejectedWhenTheSweeperIsRegistered()
@@ -91,6 +152,17 @@ public sealed class ResilientOutboxSweeperTests(PostgresFixture postgres)
                 brighter =>
                     brighter.UseResilientOutboxSweeper(options => options.Interval = TimeSpan.Zero)
             )
+        );
+    }
+
+    [Fact]
+    public async Task InvalidSettingsAreRejectedWhenTheSweeperIsCreated()
+    {
+        await using var host = await CreateHostAsync();
+        var options = new ResilientOutboxSweeperOptions { MaximumBackoff = TimeSpan.FromDays(60) };
+
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            ActivatorUtilities.CreateInstance<ResilientOutboxSweeper>(host.Services, options)
         );
     }
 

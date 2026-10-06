@@ -1,4 +1,3 @@
-using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
 namespace Meridian.Brighter.Postgres;
@@ -6,25 +5,26 @@ namespace Meridian.Brighter.Postgres;
 /// <summary>
 /// Runs a pass on an interval, starting immediately. A failed pass is logged and retried, the wait
 /// doubling with each consecutive failure up to the maximum backoff, so a database outage never
-/// ends the process.
+/// ends the process. The activity names what a pass does, for the error log.
 /// </summary>
-internal abstract class PeriodicService(TimeSpan interval, TimeSpan maximumBackoff, ILogger logger)
-    : BackgroundService
+internal sealed class PeriodicLoop(
+    TimeSpan interval,
+    TimeSpan maximumBackoff,
+    string activity,
+    ILogger logger
+)
 {
-    /// <summary>Does one pass.</summary>
-    public abstract Task RunOnceAsync(CancellationToken cancellationToken);
+    /// <summary>The longest wait <see cref="Task.Delay(TimeSpan, CancellationToken)"/> accepts.</summary>
+    public static readonly TimeSpan LongestWait = TimeSpan.FromMilliseconds(uint.MaxValue - 1);
 
-    /// <summary>What a failed pass was trying to do, for the error log.</summary>
-    protected abstract string Activity { get; }
-
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    public async Task RunAsync(Func<CancellationToken, Task> pass, CancellationToken stoppingToken)
     {
         var failures = 0;
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
-                await RunOnceAsync(stoppingToken);
+                await pass(stoppingToken);
                 failures = 0;
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -37,13 +37,20 @@ internal abstract class PeriodicService(TimeSpan interval, TimeSpan maximumBacko
                 logger.LogError(
                     exception,
                     "Failed to {Activity} {FailureCount} times in a row; retrying in {Delay}",
-                    Activity,
+                    activity,
                     failures,
                     Backoff(interval, maximumBackoff, failures)
                 );
             }
 
-            await Task.Delay(Backoff(interval, maximumBackoff, failures), stoppingToken);
+            try
+            {
+                await Task.Delay(Backoff(interval, maximumBackoff, failures), stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
         }
     }
 

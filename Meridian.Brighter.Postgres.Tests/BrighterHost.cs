@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Hosting.Internal;
@@ -14,7 +15,8 @@ namespace Meridian.Brighter.Postgres.Tests;
 /// <summary>
 /// A real Brighter producer setup: a PostgreSQL outbox in its own table, publishing to an in-memory
 /// bus. The outbox connection string lets a test point the outbox at a database that
-/// isn't there.
+/// isn't there, and the producer can be one that only sends one message at a time. The default
+/// producer also has a bulk API, and counts the batches it sends.
 /// </summary>
 internal sealed class BrighterHost : IAsyncDisposable
 {
@@ -22,12 +24,14 @@ internal sealed class BrighterHost : IAsyncDisposable
 
     private readonly ServiceProvider provider;
     private readonly string connectionString;
+    private readonly BatchCountingProducer? batchCounter;
 
     private BrighterHost(
         ServiceProvider provider,
         string connectionString,
         string table,
         InternalBus bus,
+        BatchCountingProducer? batches,
         ApplicationLifetime lifetime,
         CollectingLoggerProvider logs
     )
@@ -36,12 +40,18 @@ internal sealed class BrighterHost : IAsyncDisposable
         this.connectionString = connectionString;
         Table = table;
         Bus = bus;
+        batchCounter = batches;
         Lifetime = lifetime;
         Logs = logs;
     }
 
     public string Table { get; }
     public InternalBus Bus { get; }
+
+    /// <summary>How many batches went through the producer's bulk API.</summary>
+    public int BatchesSent =>
+        batchCounter?.BatchesSent
+        ?? throw new InvalidOperationException("This host's producer has no bulk API.");
     public ApplicationLifetime Lifetime { get; }
     public IServiceProvider Services => provider;
     public CollectingLoggerProvider Logs { get; }
@@ -49,7 +59,8 @@ internal sealed class BrighterHost : IAsyncDisposable
     public static async Task<BrighterHost> CreateAsync(
         string connectionString,
         Action<IBrighterBuilder> configure,
-        string? outboxConnectionString = null
+        string? outboxConnectionString = null,
+        bool bulkProducer = true
     )
     {
         var table = $"outbox_{Guid.NewGuid():N}";
@@ -67,6 +78,8 @@ internal sealed class BrighterHost : IAsyncDisposable
         var lifetime = new ApplicationLifetime(NullLogger<ApplicationLifetime>.Instance);
         var logs = new CollectingLoggerProvider();
         var services = new ServiceCollection();
+        var producer = new InMemoryMessageProducer(bus, new Publication { Topic = Topic });
+        var batches = bulkProducer ? new BatchCountingProducer(producer) : null;
         var configuration = new RelationalDatabaseConfiguration(
             outboxConnectionString ?? connectionString,
             outBoxTableName: table
@@ -81,10 +94,8 @@ internal sealed class BrighterHost : IAsyncDisposable
                 options.ProducerRegistry = new ProducerRegistry(
                     new Dictionary<ProducerKey, IAmAMessageProducer>
                     {
-                        [new ProducerKey(Topic)] = new InMemoryMessageProducer(
-                            bus,
-                            new Publication { Topic = Topic }
-                        ),
+                        [new ProducerKey(Topic)] =
+                            batches ?? (IAmAMessageProducer)new OneAtATimeProducer(producer),
                     }
                 );
                 options.Outbox = new PostgreSqlOutbox(configuration);
@@ -97,6 +108,7 @@ internal sealed class BrighterHost : IAsyncDisposable
             connectionString,
             table,
             bus,
+            batches,
             lifetime,
             logs
         );
@@ -132,4 +144,80 @@ internal sealed class BrighterHost : IAsyncDisposable
     }
 
     public ValueTask DisposeAsync() => provider.DisposeAsync();
+}
+
+/// <summary>Brighter's in-memory producer without its bulk API.</summary>
+internal sealed class OneAtATimeProducer(InMemoryMessageProducer producer)
+    : IAmAMessageProducerAsync
+{
+    public Publication Publication => producer.Publication;
+
+    public Activity? Span
+    {
+        get => producer.Span;
+        set => producer.Span = value;
+    }
+
+    public IAmAMessageScheduler? Scheduler
+    {
+        get => producer.Scheduler;
+        set => producer.Scheduler = value;
+    }
+
+    public Task SendAsync(Message message, CancellationToken cancellationToken = default) =>
+        producer.SendAsync(message, cancellationToken);
+
+    public Task SendWithDelayAsync(
+        Message message,
+        TimeSpan? delay,
+        CancellationToken cancellationToken = default
+    ) => producer.SendWithDelayAsync(message, delay, cancellationToken);
+
+    public ValueTask DisposeAsync() => producer.DisposeAsync();
+}
+
+/// <summary>Brighter's in-memory producer, counting the batches sent through its bulk API.</summary>
+internal sealed class BatchCountingProducer(InMemoryMessageProducer producer)
+    : IAmAMessageProducerAsync,
+        IAmABulkMessageProducerAsync
+{
+    private int batchesSent;
+
+    public int BatchesSent => batchesSent;
+
+    public Publication Publication => producer.Publication;
+
+    public Activity? Span
+    {
+        get => producer.Span;
+        set => producer.Span = value;
+    }
+
+    public IAmAMessageScheduler? Scheduler
+    {
+        get => producer.Scheduler;
+        set => producer.Scheduler = value;
+    }
+
+    public Task SendAsync(Message message, CancellationToken cancellationToken = default) =>
+        producer.SendAsync(message, cancellationToken);
+
+    public Task SendWithDelayAsync(
+        Message message,
+        TimeSpan? delay,
+        CancellationToken cancellationToken = default
+    ) => producer.SendWithDelayAsync(message, delay, cancellationToken);
+
+    public ValueTask<IEnumerable<IAmAMessageBatch>> CreateBatchesAsync(
+        IEnumerable<Message> messages,
+        CancellationToken cancellationToken
+    ) => producer.CreateBatchesAsync(messages, cancellationToken);
+
+    public Task SendAsync(IAmAMessageBatch batch, CancellationToken cancellationToken)
+    {
+        Interlocked.Increment(ref batchesSent);
+        return producer.SendAsync(batch, cancellationToken);
+    }
+
+    public ValueTask DisposeAsync() => producer.DisposeAsync();
 }

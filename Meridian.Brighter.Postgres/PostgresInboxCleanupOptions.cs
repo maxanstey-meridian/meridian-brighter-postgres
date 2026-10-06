@@ -14,4 +14,12 @@ public sealed class PostgresInboxCleanupOptions
 
     /// <summary>How many rows one delete removes. A pass repeats until the backlog is gone.</summary>
     public int BatchSize { get; set; } = 1000;
+
+    internal void Validate()
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(RetainFor, TimeSpan.Zero);
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(Interval, TimeSpan.Zero);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(Interval, PeriodicLoop.LongestWait);
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(BatchSize, 0);
+    }
 }

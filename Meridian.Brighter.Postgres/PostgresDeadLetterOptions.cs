@@ -42,6 +42,12 @@ public sealed class PostgresDeadLetterOptions
         return Add<TRequest>(new DeadLetterPolicy.Expire(after));
     }
 
+    internal void Validate()
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(Interval, TimeSpan.Zero);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(Interval, PeriodicLoop.LongestWait);
+    }
+
     private PostgresDeadLetterOptions Add<TRequest>(DeadLetterPolicy policy)
     {
         if (!policies.TryAdd(typeof(TRequest), policy))

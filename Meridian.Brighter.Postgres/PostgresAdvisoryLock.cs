@@ -10,9 +10,12 @@ namespace Meridian.Brighter.Postgres;
 /// Lets one process at a time hold a Brighter lock, using PostgreSQL session advisory locks.
 /// Paramore.Brighter.Locking.PostgresSql keys its lock on <c>string.GetHashCode</c>, which .NET
 /// randomises per process, so replicas never contend; this keys on a stable hash of the resource.
-/// Brighter's archiver calls the lock from a timer callback, so failures are logged and reported as
-/// "not obtained". For the same reason the lock is refused once the application is stopping: work
-/// that won it would go on to use the service provider the host is disposing.
+/// A database error is thrown, not reported as "not obtained": that would look like another process
+/// holding the lock, so the caller would skip its turn quietly and never back off. Brighter's
+/// archiver and this package's sweeper log what the lock throws as an error (Brighter's own sweeper
+/// doesn't catch it, so the process ends, as it already does when its sweep fails). The lock is
+/// refused once the application is stopping: work that won it would go on to use the service
+/// provider the host is disposing.
 /// </summary>
 internal sealed class PostgresAdvisoryLock(
     string connectionString,
@@ -58,10 +61,6 @@ internal sealed class PostgresAdvisoryLock(
             await handle.DisposeAsync();
         }
         catch (OperationCanceledException) when (obtaining.IsCancellationRequested) { }
-        catch (Exception exception)
-        {
-            logger.LogWarning(exception, "Could not take the {Resource} lock", resource);
-        }
         return null;
     }
 

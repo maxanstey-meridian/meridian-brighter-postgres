@@ -9,6 +9,9 @@ namespace Meridian.Brighter.Postgres.Tests;
 [Collection("Postgres")]
 public sealed class ResilientOutboxSweeperTests(PostgresFixture postgres)
 {
+    private const string UnreachableDatabase =
+        "Host=127.0.0.1;Port=1;Database=none;Username=none;Password=none;Timeout=1";
+
     [Fact]
     public async Task ASweepDispatchesDepositedMessagesOneAtATime()
     {
@@ -48,9 +51,7 @@ public sealed class ResilientOutboxSweeperTests(PostgresFixture postgres)
     [Fact]
     public async Task TheSweeperKeepsRunningAfterSweepsFail()
     {
-        await using var host = await CreateHostAsync(
-            outboxConnectionString: "Host=127.0.0.1;Port=1;Database=none;Username=none;Password=none;Timeout=1"
-        );
+        await using var host = await CreateHostAsync(outboxConnectionString: UnreachableDatabase);
         var sweeper = host.Sweeper;
 
         await sweeper.StartAsync(CancellationToken.None);
@@ -63,6 +64,23 @@ public sealed class ResilientOutboxSweeperTests(PostgresFixture postgres)
         await sweeper.StopAsync(CancellationToken.None);
 
         Assert.True(stillRunning);
+        Assert.Contains(host.Logs.Entries, entry => entry.Message.Contains("2 times in a row"));
+    }
+
+    [Fact]
+    public async Task ALockDatabaseErrorIsAFailedSweepNotASkippedOne()
+    {
+        await using var host = await CreateHostAsync(lockConnectionString: UnreachableDatabase);
+        var sweeper = host.Sweeper;
+
+        await sweeper.StartAsync(CancellationToken.None);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        while (Failures(host) < 2)
+        {
+            await Task.Delay(50, timeout.Token);
+        }
+        await sweeper.StopAsync(CancellationToken.None);
+
         Assert.Contains(host.Logs.Entries, entry => entry.Message.Contains("2 times in a row"));
     }
 
@@ -166,12 +184,15 @@ public sealed class ResilientOutboxSweeperTests(PostgresFixture postgres)
         );
     }
 
-    private Task<BrighterHost> CreateHostAsync(string? outboxConnectionString = null) =>
+    private Task<BrighterHost> CreateHostAsync(
+        string? outboxConnectionString = null,
+        string? lockConnectionString = null
+    ) =>
         BrighterHost.CreateAsync(
             postgres.ConnectionString,
             brighter =>
                 brighter
-                    .UsePostgresAdvisoryLock(postgres.ConnectionString)
+                    .UsePostgresAdvisoryLock(lockConnectionString ?? postgres.ConnectionString)
                     .UseResilientOutboxSweeper(options =>
                     {
                         options.Interval = TimeSpan.FromMilliseconds(100);

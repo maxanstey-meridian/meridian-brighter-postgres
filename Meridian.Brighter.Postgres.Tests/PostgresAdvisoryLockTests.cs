@@ -18,6 +18,9 @@ public sealed class PostgresAdvisoryLockTests(PostgresFixture postgres)
     /// </summary>
     private const long SweeperAdvisoryKey = -4955300872608156329;
 
+    private const string UnreachableDatabase =
+        "Host=127.0.0.1;Port=1;Database=none;Username=none;Password=none;Timeout=1";
+
     [Fact]
     public async Task OnlyOneProcessHoldsTheLockUntilItIsReleased()
     {
@@ -67,13 +70,13 @@ public sealed class PostgresAdvisoryLockTests(PostgresFixture postgres)
     }
 
     [Fact]
-    public async Task AnUnreachableDatabaseIsReportedAsNotObtainedRatherThanThrown()
+    public async Task AnUnreachableDatabaseIsThrownRatherThanReportedAsNotObtained()
     {
-        var replica = CreateLock(
-            "Host=127.0.0.1;Port=1;Database=none;Username=none;Password=none;Timeout=1"
-        );
+        var replica = CreateLock(UnreachableDatabase);
 
-        Assert.Null(await replica.ObtainLockAsync(Resource, CancellationToken.None));
+        await Assert.ThrowsAsync<NpgsqlException>(() =>
+            replica.ObtainLockAsync(Resource, CancellationToken.None)
+        );
         await replica.ReleaseLockAsync(Resource, "unknown", CancellationToken.None);
     }
 

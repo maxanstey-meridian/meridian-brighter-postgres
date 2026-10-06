@@ -135,8 +135,10 @@ it only one replica sweeps or archives at a time.
   wasn't obtained, and skips its turn.
 - The key is the SHA-1 hash of `brighter:{resource}`, the same in every process and every version
   of this package.
-- A database error is logged as a warning and reported as "not obtained", never thrown, because
-  Brighter's archiver calls the lock from a timer callback.
+- A database error is thrown, not reported as "not obtained", so the caller sees a failure rather
+  than quietly skipping its turn as if another process held the lock. This package's sweeper and
+  Brighter's archiver log it as an error (the sweeper backs off). Brighter's own sweeper doesn't
+  catch it, so the process ends, as it already does when its sweep fails.
 - Once the app is stopping, the lock is refused, so no pass starts with services the host is
   disposing.
 
@@ -293,10 +295,13 @@ Log categories are the class names under `Meridian.Brighter.Postgres`, such as
 | Error       | `Failed to {Activity} {FailureCount} times in a row; retrying in {Delay}`                                      | A pass failed. `Activity` is "sweep the outbox", "apply dead-letter policies" or "clear old inbox rows". Alert on repeats. |
 | Error       | `{MessageCount} dead-lettered {MessageType} messages are past their re-drive window and are not being retried` | Re-drive has given up on these. Logged on every pass until they are removed.                                               |
 | Warning     | `Re-drove {MessageCount} dead-lettered {MessageType} messages`                                                 | Handlers failed and their messages are being retried.                                                                      |
-| Warning     | `Could not take the {Resource} lock`                                                                           | The lock's database call failed; the caller skipped its turn.                                                              |
 | Warning     | `Could not release the {Resource} lock; closing its connection releases it`                                    | The release failed; the lock goes when its connection closes.                                                              |
 | Information | `Deleted {MessageCount} expired dead-lettered {MessageType} messages`                                          | An expiry policy deleted dead letters.                                                                                     |
 | Information | `Deleted {RowCount} inbox rows past retention`                                                                 | Inbox cleanup removed rows.                                                                                                |
+
+Brighter's archiver logs a failed pass, including a lock error, at Error as `Error while sweeping the
+outbox`. Its category is `Paramore.Brighter.Outbox.Hosting.TimedOutboxSweeper`, not the archiver's
+own.
 
 ### Inspecting dead letters
 

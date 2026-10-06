@@ -1,3 +1,7 @@
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Paramore.Brighter;
 using Paramore.Brighter.MessagingGateway.Postgres;
 using Paramore.Brighter.ServiceActivator.Extensions.DependencyInjection;
@@ -13,14 +17,13 @@ public sealed class PostgresDeadLetterServiceTests(PostgresFixture postgres)
     public async Task ARedrivenMessageIsBackOnItsQueueWithAFreshBudget(bool binaryMessagePayload)
     {
         var queue = new DeadLetterQueue(postgres.ConnectionString, binaryMessagePayload);
-        var rejected = await queue.DeadLetterAsync<Erase>();
+        var rejected = queue.DeadLetter<Erase>();
         var service = queue.Service(options =>
             options.Redrive<Erase>(after: TimeSpan.Zero, giveUpAfter: TimeSpan.FromDays(1))
         );
 
-        var pass = Assert.Single(await service.ApplyAsync(CancellationToken.None));
+        await service.RunOnceAsync(CancellationToken.None);
 
-        Assert.Equal(1, pass.Redriven);
         Assert.Equal(0, await queue.DeadLetterCountAsync<Erase>());
         var redriven = queue.ReceiveFromSource<Erase>();
         Assert.NotNull(redriven);
@@ -35,44 +38,47 @@ public sealed class PostgresDeadLetterServiceTests(PostgresFixture postgres)
     public async Task ARecentDeadLetterWaitsBeforeItIsRedriven()
     {
         var queue = new DeadLetterQueue(postgres.ConnectionString, binaryMessagePayload: true);
-        await queue.DeadLetterAsync<Erase>();
+        queue.DeadLetter<Erase>();
         var service = queue.Service(options =>
             options.Redrive<Erase>(after: TimeSpan.FromHours(1), giveUpAfter: TimeSpan.FromDays(1))
         );
 
-        var pass = Assert.Single(await service.ApplyAsync(CancellationToken.None));
+        await service.RunOnceAsync(CancellationToken.None);
 
-        Assert.Equal(0, pass.Redriven);
         Assert.Equal(1, await queue.DeadLetterCountAsync<Erase>());
+        Assert.Null(queue.ReceiveFromSource<Erase>());
     }
 
     [Fact]
     public async Task AMessagePastItsRedriveWindowStaysDeadLetteredAndIsReported()
     {
         var queue = new DeadLetterQueue(postgres.ConnectionString, binaryMessagePayload: true);
-        await queue.DeadLetterAsync<Erase>(createdAt: DateTimeOffset.UtcNow.AddDays(-2));
+        queue.DeadLetter<Erase>(createdAt: DateTimeOffset.UtcNow.AddDays(-2));
         var service = queue.Service(options =>
             options.Redrive<Erase>(after: TimeSpan.Zero, giveUpAfter: TimeSpan.FromDays(1))
         );
 
-        var pass = Assert.Single(await service.ApplyAsync(CancellationToken.None));
+        await service.RunOnceAsync(CancellationToken.None);
 
-        Assert.Equal(0, pass.Redriven);
-        Assert.Equal(1, pass.Abandoned);
         Assert.Equal(1, await queue.DeadLetterCountAsync<Erase>());
+        Assert.Null(queue.ReceiveFromSource<Erase>());
+        var report = Assert.Single(queue.Logs.Entries, entry => entry.Level == LogLevel.Error);
+        Assert.StartsWith(
+            "1 dead-lettered Erase messages are past their re-drive window",
+            report.Message
+        );
     }
 
     [Fact]
     public async Task AnExpiredDeadLetterIsDeletedAndOtherTypesKeepTheirs()
     {
         var queue = new DeadLetterQueue(postgres.ConnectionString, binaryMessagePayload: false);
-        await queue.DeadLetterAsync<Notify>();
-        await queue.DeadLetterAsync<Erase>();
+        queue.DeadLetter<Notify>();
+        queue.DeadLetter<Erase>();
         var service = queue.Service(options => options.Expire<Notify>(after: TimeSpan.Zero));
 
-        var pass = Assert.Single(await service.ApplyAsync(CancellationToken.None));
+        await service.RunOnceAsync(CancellationToken.None);
 
-        Assert.Equal(1, pass.Expired);
         Assert.Equal(0, await queue.DeadLetterCountAsync<Notify>());
         Assert.Equal(1, await queue.DeadLetterCountAsync<Erase>());
     }
@@ -81,15 +87,65 @@ public sealed class PostgresDeadLetterServiceTests(PostgresFixture postgres)
     public async Task ADeadLetterYoungerThanItsExpiryIsKept()
     {
         var queue = new DeadLetterQueue(postgres.ConnectionString, binaryMessagePayload: false);
-        await queue.DeadLetterAsync<Notify>();
+        queue.DeadLetter<Notify>();
         var service = queue.Service(options =>
             options.Expire<Notify>(after: TimeSpan.FromHours(1))
         );
 
-        var pass = Assert.Single(await service.ApplyAsync(CancellationToken.None));
+        await service.RunOnceAsync(CancellationToken.None);
 
-        Assert.Equal(0, pass.Expired);
         Assert.Equal(1, await queue.DeadLetterCountAsync<Notify>());
+    }
+
+    [Fact]
+    public async Task TypesSharingADeadLetterQueueOnlyHaveTheirOwnMessagesActedOn()
+    {
+        var queue = new DeadLetterQueue(
+            postgres.ConnectionString,
+            binaryMessagePayload: true,
+            sharedDeadLetterQueue: true
+        );
+        var erase = queue.DeadLetter<Erase>();
+        queue.DeadLetter<Notify>();
+        var service = queue.Service(options =>
+            options.Redrive<Erase>(after: TimeSpan.Zero, giveUpAfter: TimeSpan.FromDays(1))
+        );
+
+        await service.RunOnceAsync(CancellationToken.None);
+
+        Assert.Equal(erase.Id, queue.ReceiveFromSource<Erase>()?.Id);
+        Assert.Null(queue.ReceiveFromSource<Erase>());
+        Assert.Equal(1, await queue.DeadLetterCountAsync<Notify>());
+
+        await queue
+            .Service(options => options.Expire<Erase>(after: TimeSpan.Zero))
+            .RunOnceAsync(CancellationToken.None);
+
+        Assert.Equal(1, await queue.DeadLetterCountAsync<Notify>());
+    }
+
+    [Fact]
+    public async Task RegisteringPoliciesResolvesTheirQueuesFromTheConsumers()
+    {
+        var queue = new DeadLetterQueue(postgres.ConnectionString, binaryMessagePayload: true);
+        queue.DeadLetter<Erase>();
+        var services = new ServiceCollection().AddLogging();
+        services
+            .AddConsumers(options => options.Subscriptions = queue.Subscriptions)
+            .UsePostgresDeadLetters(
+                queue.Gateway,
+                options =>
+                    options.Redrive<Erase>(after: TimeSpan.Zero, giveUpAfter: TimeSpan.FromDays(1))
+            );
+        await using var provider = services.BuildServiceProvider();
+
+        var service = provider
+            .GetServices<IHostedService>()
+            .OfType<PostgresDeadLetterService>()
+            .Single();
+        await service.RunOnceAsync(CancellationToken.None);
+
+        Assert.Equal(0, await queue.DeadLetterCountAsync<Erase>());
     }
 
     [Fact]
@@ -115,13 +171,7 @@ public sealed class PostgresDeadLetterServiceTests(PostgresFixture postgres)
                 new RelationalDatabaseConfiguration(postgres.ConnectionString),
                 consumers,
                 options,
-                TimeProvider.System,
-                Microsoft
-                    .Extensions
-                    .Logging
-                    .Abstractions
-                    .NullLogger<PostgresDeadLetterService>
-                    .Instance
+                NullLogger<PostgresDeadLetterService>.Instance
             )
         );
         Assert.Contains("no dead-letter routing key", error.Message);

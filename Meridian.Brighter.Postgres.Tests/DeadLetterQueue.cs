@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using Paramore.Brighter;
 using Paramore.Brighter.MessagingGateway.Postgres;
@@ -12,15 +12,19 @@ public sealed class Notify() : Command(Id.Random());
 
 /// <summary>
 /// Brighter's PostgreSQL transport in its own queue table, with a subscription per message type
-/// that dead-letters to its own queue. Messages reach the dead-letter queue the way they do in
-/// production: received by Brighter's consumer and rejected.
+/// that dead-letters to its own queue, or to one queue they share. Messages reach the dead-letter
+/// queue the way they do in production: received by Brighter's consumer and rejected.
 /// </summary>
 internal sealed class DeadLetterQueue
 {
     private readonly string connectionString;
     private readonly Dictionary<Type, PostgresSubscription> subscriptions = [];
 
-    public DeadLetterQueue(string connectionString, bool binaryMessagePayload)
+    public DeadLetterQueue(
+        string connectionString,
+        bool binaryMessagePayload,
+        bool sharedDeadLetterQueue = false
+    )
     {
         this.connectionString = connectionString;
         Gateway = new RelationalDatabaseConfiguration(
@@ -36,7 +40,9 @@ internal sealed class DeadLetterQueue
                 new RoutingKey(type.Name.ToLowerInvariant()),
                 dataType: type,
                 messagePumpType: MessagePumpType.Reactor,
-                deadLetterRoutingKey: new RoutingKey($"{type.Name.ToLowerInvariant()}.dlq")
+                deadLetterRoutingKey: new RoutingKey(
+                    sharedDeadLetterQueue ? "shared.dlq" : $"{type.Name.ToLowerInvariant()}.dlq"
+                )
             );
         }
         var channels = new PostgresChannelFactory(new PostgresMessagingGatewayConnection(Gateway));
@@ -48,8 +54,9 @@ internal sealed class DeadLetterQueue
 
     public RelationalDatabaseConfiguration Gateway { get; }
 
-    public IAmConsumerOptions Consumers =>
-        new ConsumersOptions { Subscriptions = subscriptions.Values.ToList() };
+    public CollectingLoggerProvider Logs { get; } = new();
+
+    public IReadOnlyList<Subscription> Subscriptions => subscriptions.Values.ToList();
 
     public PostgresDeadLetterService Service(Action<PostgresDeadLetterOptions> configure)
     {
@@ -57,15 +64,14 @@ internal sealed class DeadLetterQueue
         configure(options);
         return new PostgresDeadLetterService(
             Gateway,
-            Consumers,
+            new ConsumersOptions { Subscriptions = Subscriptions },
             options,
-            TimeProvider.System,
-            NullLogger<PostgresDeadLetterService>.Instance
+            new Logger<PostgresDeadLetterService>(new LoggerFactory([Logs]))
         );
     }
 
     /// <summary>Publishes a message, receives it and rejects it to the dead-letter queue.</summary>
-    public async Task<Message> DeadLetterAsync<T>(DateTimeOffset? createdAt = null)
+    public Message DeadLetter<T>(DateTimeOffset? createdAt = null)
     {
         var subscription = subscriptions[typeof(T)];
         var message = new Message(
@@ -92,7 +98,6 @@ internal sealed class DeadLetterQueue
             received,
             new MessageRejectionReason(RejectionReason.DeliveryError, "handler failed")
         );
-        await Task.Delay(20);
         return received;
     }
 

@@ -75,7 +75,7 @@ public sealed class ResilientOutboxSweeperTests(PostgresFixture postgres)
     ) =>
         Assert.Equal(
             TimeSpan.FromSeconds(expectedSeconds),
-            ResilientOutboxSweeper.Backoff(
+            PeriodicService.Backoff(
                 TimeSpan.FromSeconds(intervalSeconds),
                 TimeSpan.FromMinutes(1),
                 failures
@@ -111,6 +111,6 @@ public sealed class ResilientOutboxSweeperTests(PostgresFixture postgres)
 
     private static int Failures(BrighterHost host) =>
         host.Logs.Entries.Count(entry =>
-            entry.Level == LogLevel.Error && entry.Message.StartsWith("Outbox sweep failed")
+            entry.Level == LogLevel.Error && entry.Message.StartsWith("Failed to sweep the outbox")
         );
 }

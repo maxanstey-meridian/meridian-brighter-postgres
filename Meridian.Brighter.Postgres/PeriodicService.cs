@@ -4,17 +4,13 @@ using Microsoft.Extensions.Logging;
 namespace Meridian.Brighter.Postgres;
 
 /// <summary>
-/// Runs a pass on a fixed interval, starting immediately. A failed pass is logged and the next one
-/// runs on schedule, so a database outage never ends the process.
+/// Runs a pass on an interval, starting immediately. A failed pass is logged and retried, the wait
+/// doubling with each consecutive failure up to the maximum backoff, so a database outage never
+/// ends the process.
 /// </summary>
-internal abstract class PeriodicService(
-    TimeSpan interval,
-    TimeProvider timeProvider,
-    ILogger logger
-) : BackgroundService
+internal abstract class PeriodicService(TimeSpan interval, TimeSpan maximumBackoff, ILogger logger)
+    : BackgroundService
 {
-    protected TimeProvider TimeProvider { get; } = timeProvider;
-
     /// <summary>Does one pass.</summary>
     public abstract Task RunOnceAsync(CancellationToken cancellationToken);
 
@@ -23,11 +19,13 @@ internal abstract class PeriodicService(
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        var failures = 0;
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
                 await RunOnceAsync(stoppingToken);
+                failures = 0;
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -35,10 +33,31 @@ internal abstract class PeriodicService(
             }
             catch (Exception exception)
             {
-                logger.LogError(exception, "Failed to {Activity}", Activity);
+                failures++;
+                logger.LogError(
+                    exception,
+                    "Failed to {Activity} {FailureCount} times in a row; retrying in {Delay}",
+                    Activity,
+                    failures,
+                    Backoff(interval, maximumBackoff, failures)
+                );
             }
 
-            await Task.Delay(interval, TimeProvider, stoppingToken);
+            await Task.Delay(Backoff(interval, maximumBackoff, failures), stoppingToken);
         }
     }
+
+    /// <summary>
+    /// The interval, doubled for each consecutive failure up to the maximum backoff (or the
+    /// interval, if that is longer).
+    /// </summary>
+    public static TimeSpan Backoff(TimeSpan interval, TimeSpan maximum, int failures) =>
+        failures == 0
+            ? interval
+            : TimeSpan.FromSeconds(
+                Math.Max(
+                    interval.TotalSeconds,
+                    Math.Min(interval.TotalSeconds * Math.Pow(2, failures), maximum.TotalSeconds)
+                )
+            );
 }

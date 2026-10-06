@@ -48,11 +48,9 @@ public static class BrighterBuilderExtensions
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(options.BatchSize, 0);
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(options.MaximumBackoff, TimeSpan.Zero);
 
-        brighter.Services.TryAddSingleton(TimeProvider.System);
         brighter.Services.AddHostedService(provider => new ResilientOutboxSweeper(
             provider.GetRequiredService<IAmAnOutboxProducerMediator>(),
             provider.GetRequiredService<IDistributedLock>(),
-            provider.GetRequiredService<TimeProvider>(),
             options,
             provider.GetRequiredService<ILogger<ResilientOutboxSweeper>>()
         ));
@@ -76,12 +74,10 @@ public static class BrighterBuilderExtensions
         configure(options);
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(options.Interval, TimeSpan.Zero);
 
-        brighter.Services.TryAddSingleton(TimeProvider.System);
         brighter.Services.AddHostedService(provider => new PostgresDeadLetterService(
             gateway,
             provider.GetRequiredService<IAmConsumerOptions>(),
             options,
-            provider.GetRequiredService<TimeProvider>(),
             provider.GetRequiredService<ILogger<PostgresDeadLetterService>>()
         ));
         return brighter;
@@ -104,11 +100,9 @@ public static class BrighterBuilderExtensions
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(options.Interval, TimeSpan.Zero);
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(options.BatchSize, 0);
 
-        brighter.Services.TryAddSingleton(TimeProvider.System);
         brighter.Services.AddHostedService(provider => new PostgresInboxCleaner(
             inbox,
             options,
-            provider.GetRequiredService<TimeProvider>(),
             provider.GetRequiredService<ILogger<PostgresInboxCleaner>>()
         ));
         return brighter;

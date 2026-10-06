@@ -1,6 +1,9 @@
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using Paramore.Brighter;
+using Paramore.Brighter.Extensions.DependencyInjection;
 using Paramore.Brighter.Inbox.Postgres;
 
 namespace Meridian.Brighter.Postgres.Tests;
@@ -34,7 +37,6 @@ public sealed class PostgresInboxCleanerTests(PostgresFixture postgres)
         var cleaner = new PostgresInboxCleaner(
             configuration,
             new PostgresInboxCleanupOptions { BatchSize = 2 },
-            TimeProvider.System,
             NullLogger<PostgresInboxCleaner>.Instance
         );
 
@@ -49,6 +51,23 @@ public sealed class PostgresInboxCleanerTests(PostgresFixture postgres)
             )
         );
         Assert.Equal(0, await cleaner.DeleteExpiredAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task RegisteringCleanupAddsTheCleaner()
+    {
+        var services = new ServiceCollection().AddLogging();
+        services
+            .AddBrighter()
+            .UsePostgresInboxCleanup(
+                new RelationalDatabaseConfiguration(
+                    postgres.ConnectionString,
+                    inboxTableName: "inbox"
+                )
+            );
+        await using var provider = services.BuildServiceProvider();
+
+        Assert.Single(provider.GetServices<IHostedService>().OfType<PostgresInboxCleaner>());
     }
 
     private async Task ExecuteAsync(string sql)

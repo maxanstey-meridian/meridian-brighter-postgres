@@ -10,17 +10,29 @@ namespace Meridian.Brighter.Postgres;
 /// or retention of its own, so this works on the queue table directly. The queue each policy acts
 /// on comes from the type's subscription, so apps state policy per message type, not per queue.
 /// </summary>
+/// <remarks>
+/// Types may share a dead-letter queue, so every statement also matches the <c>originalTopic</c>
+/// Brighter stamps on a rejected message. Ages are measured with <c>CURRENT_TIMESTAMP</c>, because
+/// Brighter stamps <c>visible_timeout</c> with the database clock, not the app's.
+/// </remarks>
 internal sealed class PostgresDeadLetterService : PeriodicService
 {
-    /// <summary>Header bag keys Brighter stamps on a rejected message.</summary>
-    private static readonly string[] RejectionMetadataKeys =
-    [
-        "originalTopic",
-        "originalMessageType",
-        "rejectionReason",
-        "rejectionMessage",
-        "rejectionTimestamp",
-    ];
+    /// <summary>Removes the header bag keys Brighter stamps on a rejected message.</summary>
+    private static readonly string StripRejectionMetadata = string.Concat(
+        new[]
+        {
+            "originalTopic",
+            "originalMessageType",
+            "rejectionReason",
+            "rejectionMessage",
+            "rejectionTimestamp",
+        }.Select(key => $" #- '{{header,bag,{key}}}'")
+    );
+
+    private const string OriginalTopic =
+        """("content"::jsonb -> 'header' -> 'bag' ->> 'originalTopic')""";
+    private const string CreatedAt =
+        """("content"::jsonb -> 'header' ->> 'timeStamp')::timestamptz""";
 
     private readonly string connectionString;
     private readonly IReadOnlyList<DeadLetterQueue> queues;
@@ -30,10 +42,9 @@ internal sealed class PostgresDeadLetterService : PeriodicService
         IAmARelationalDatabaseConfiguration gateway,
         IAmConsumerOptions consumers,
         PostgresDeadLetterOptions options,
-        TimeProvider timeProvider,
         ILogger<PostgresDeadLetterService> logger
     )
-        : base(options.Interval, timeProvider, logger)
+        : base(options.Interval, options.Interval, logger)
     {
         connectionString = gateway.ConnectionString;
         queues = options
@@ -44,67 +55,47 @@ internal sealed class PostgresDeadLetterService : PeriodicService
 
     protected override string Activity => "apply dead-letter policies";
 
-    public override async Task RunOnceAsync(CancellationToken cancellationToken) =>
-        await ApplyAsync(cancellationToken);
-
-    public async Task<IReadOnlyList<DeadLetterPass>> ApplyAsync(CancellationToken cancellationToken)
+    public override async Task RunOnceAsync(CancellationToken cancellationToken)
     {
-        var now = TimeProvider.GetUtcNow();
-        var passes = new List<DeadLetterPass>();
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
         foreach (var queue in queues)
         {
-            var pass = queue.Policy switch
+            switch (queue.Policy)
             {
-                DeadLetterPolicy.Redrive redrive => await RedriveAsync(
-                    connection,
-                    queue,
-                    redrive,
-                    now,
-                    cancellationToken
-                ),
-                DeadLetterPolicy.Expire expire => await ExpireAsync(
-                    connection,
-                    queue,
-                    expire,
-                    now,
-                    cancellationToken
-                ),
-                _ => throw new InvalidOperationException($"Unknown policy {queue.Policy}"),
-            };
-            Report(pass);
-            passes.Add(pass);
+                case DeadLetterPolicy.Redrive redrive:
+                    await RedriveAsync(connection, queue, redrive, cancellationToken);
+                    break;
+                case DeadLetterPolicy.Expire expire:
+                    await ExpireAsync(connection, queue, expire, cancellationToken);
+                    break;
+            }
         }
-        return passes;
     }
 
-    private static async Task<DeadLetterPass> RedriveAsync(
+    private async Task RedriveAsync(
         NpgsqlConnection connection,
         DeadLetterQueue queue,
         DeadLetterPolicy.Redrive policy,
-        DateTimeOffset now,
         CancellationToken cancellationToken
     )
     {
-        var stripMetadata = string.Concat(
-            RejectionMetadataKeys.Select(key => $" #- '{{header,bag,{key}}}'")
-        );
         await using var redrive = new NpgsqlCommand(
             $$"""
             UPDATE {{queue.Table}}
             SET "queue" = $1,
-                "visible_timeout" = $2,
+                "visible_timeout" = CURRENT_TIMESTAMP,
                 "content" = (
                     jsonb_set(
                         jsonb_set("content"::jsonb, '{header,handledCount}', '0'),
                         '{header,topic}',
-                        to_jsonb($3::text)
-                    ){{stripMetadata}}
+                        to_jsonb($2::text)
+                    ){{StripRejectionMetadata}}
                 )::{{queue.ContentType}}
-            WHERE "queue" = $4
-              AND "visible_timeout" < $5
-              AND ("content"::jsonb -> 'header' ->> 'timeStamp')::timestamptz >= $6
+            WHERE "queue" = $3
+              AND {{OriginalTopic}} = $2
+              AND "visible_timeout" < CURRENT_TIMESTAMP - $4
+              AND {{CreatedAt}} >= CURRENT_TIMESTAMP - $5
             """,
             connection
         )
@@ -112,24 +103,29 @@ internal sealed class PostgresDeadLetterService : PeriodicService
             Parameters =
             {
                 new() { Value = queue.Source },
-                new() { Value = now },
                 new() { Value = queue.Topic },
                 new() { Value = queue.DeadLetters },
-                new() { Value = now - policy.After },
-                new() { Value = now - policy.GiveUpAfter },
+                new() { Value = policy.After },
+                new() { Value = policy.GiveUpAfter },
             },
         };
         var redriven = await redrive.ExecuteNonQueryAsync(cancellationToken);
+        if (redriven > 0)
+        {
+            logger.LogWarning(
+                "Re-drove {MessageCount} dead-lettered {MessageType} messages",
+                redriven,
+                queue.RequestType.Name
+            );
+        }
 
         await using var abandoned = new NpgsqlCommand(
             $"""
             SELECT count(*)::int
             FROM {queue.Table}
             WHERE "queue" = $1
-              AND (
-                  ("content"::jsonb -> 'header' ->> 'timeStamp')::timestamptz < $2
-                  OR "content"::jsonb -> 'header' ->> 'timeStamp' IS NULL
-              )
+              AND {OriginalTopic} = $2
+              AND ({CreatedAt} < CURRENT_TIMESTAMP - $3 OR {CreatedAt} IS NULL)
             """,
             connection
         )
@@ -137,65 +133,52 @@ internal sealed class PostgresDeadLetterService : PeriodicService
             Parameters =
             {
                 new() { Value = queue.DeadLetters },
-                new() { Value = now - policy.GiveUpAfter },
+                new() { Value = queue.Topic },
+                new() { Value = policy.GiveUpAfter },
             },
         };
         var given = (int)(await abandoned.ExecuteScalarAsync(cancellationToken))!;
-        return new DeadLetterPass(
-            queue.RequestType,
-            Redriven: redriven,
-            Abandoned: given,
-            Expired: 0
-        );
+        if (given > 0)
+        {
+            logger.LogError(
+                "{MessageCount} dead-lettered {MessageType} messages are past their re-drive window and are not being retried",
+                given,
+                queue.RequestType.Name
+            );
+        }
     }
 
-    private static async Task<DeadLetterPass> ExpireAsync(
+    private async Task ExpireAsync(
         NpgsqlConnection connection,
         DeadLetterQueue queue,
         DeadLetterPolicy.Expire policy,
-        DateTimeOffset now,
         CancellationToken cancellationToken
     )
     {
         await using var expire = new NpgsqlCommand(
-            $"""DELETE FROM {queue.Table} WHERE "queue" = $1 AND "visible_timeout" < $2""",
+            $"""
+            DELETE FROM {queue.Table}
+            WHERE "queue" = $1
+              AND {OriginalTopic} = $2
+              AND "visible_timeout" < CURRENT_TIMESTAMP - $3
+            """,
             connection
         )
         {
             Parameters =
             {
                 new() { Value = queue.DeadLetters },
-                new() { Value = now - policy.After },
+                new() { Value = queue.Topic },
+                new() { Value = policy.After },
             },
         };
         var expired = await expire.ExecuteNonQueryAsync(cancellationToken);
-        return new DeadLetterPass(queue.RequestType, Redriven: 0, Abandoned: 0, Expired: expired);
-    }
-
-    private void Report(DeadLetterPass pass)
-    {
-        if (pass.Redriven > 0)
-        {
-            logger.LogWarning(
-                "Re-drove {MessageCount} dead-lettered {MessageType} messages",
-                pass.Redriven,
-                pass.RequestType.Name
-            );
-        }
-        if (pass.Abandoned > 0)
-        {
-            logger.LogError(
-                "{MessageCount} dead-lettered {MessageType} messages are past their re-drive window and are not being retried",
-                pass.Abandoned,
-                pass.RequestType.Name
-            );
-        }
-        if (pass.Expired > 0)
+        if (expired > 0)
         {
             logger.LogInformation(
                 "Deleted {MessageCount} expired dead-lettered {MessageType} messages",
-                pass.Expired,
-                pass.RequestType.Name
+                expired,
+                queue.RequestType.Name
             );
         }
     }
@@ -252,6 +235,3 @@ internal sealed class PostgresDeadLetterService : PeriodicService
         string Topic
     );
 }
-
-/// <summary>What one pass did to one message type's dead letters.</summary>
-internal sealed record DeadLetterPass(Type RequestType, int Redriven, int Abandoned, int Expired);

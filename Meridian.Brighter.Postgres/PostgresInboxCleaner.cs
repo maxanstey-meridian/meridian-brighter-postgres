@@ -12,9 +12,8 @@ namespace Meridian.Brighter.Postgres;
 internal sealed class PostgresInboxCleaner(
     IAmARelationalDatabaseConfiguration inbox,
     PostgresInboxCleanupOptions options,
-    TimeProvider timeProvider,
     ILogger<PostgresInboxCleaner> logger
-) : PeriodicService(options.Interval, timeProvider, logger)
+) : PeriodicService(options.Interval, options.Interval, logger)
 {
     private readonly string table = Qualified(inbox);
 
@@ -31,7 +30,6 @@ internal sealed class PostgresInboxCleaner(
 
     public async Task<int> DeleteExpiredAsync(CancellationToken cancellationToken)
     {
-        var cutoff = TimeProvider.GetUtcNow() - options.RetainFor;
         await using var connection = new NpgsqlConnection(inbox.ConnectionString);
         await connection.OpenAsync(cancellationToken);
         var total = 0;
@@ -42,7 +40,7 @@ internal sealed class PostgresInboxCleaner(
                 WITH expired AS (
                     SELECT commandid, contextkey
                     FROM {table}
-                    WHERE timestamp < $1
+                    WHERE timestamp < CURRENT_TIMESTAMP - $1
                     LIMIT $2
                     FOR UPDATE SKIP LOCKED
                 )
@@ -56,7 +54,7 @@ internal sealed class PostgresInboxCleaner(
             {
                 Parameters =
                 {
-                    new() { Value = cutoff },
+                    new() { Value = options.RetainFor },
                     new() { Value = options.BatchSize },
                 },
             };

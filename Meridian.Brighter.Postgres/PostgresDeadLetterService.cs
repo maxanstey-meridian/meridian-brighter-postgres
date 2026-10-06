@@ -11,8 +11,10 @@ namespace Meridian.Brighter.Postgres;
 /// on comes from the type's subscription, so apps state policy per message type, not per queue.
 /// </summary>
 /// <remarks>
-/// Types may share a dead-letter queue, so every statement also matches the <c>originalTopic</c>
-/// Brighter stamps on a rejected message. Ages are measured with <c>CURRENT_TIMESTAMP</c>, because
+/// Brighter writes dead letters to the gateway configuration's queue table, even for a
+/// subscription that reads from a table of its own, so a re-drive moves each message into the
+/// subscription's table. Types may share a dead-letter queue, so every statement also matches the
+/// <c>originalTopic</c> Brighter stamps on a rejected message. Ages are measured with <c>CURRENT_TIMESTAMP</c>, because
 /// Brighter stamps <c>visible_timeout</c> with the database clock, not the app's.
 /// </remarks>
 internal sealed class PostgresDeadLetterService : PeriodicService
@@ -82,20 +84,26 @@ internal sealed class PostgresDeadLetterService : PeriodicService
     {
         await using var redrive = new NpgsqlCommand(
             $$"""
-            UPDATE {{queue.Table}}
-            SET "queue" = $1,
-                "visible_timeout" = CURRENT_TIMESTAMP,
-                "content" = (
+            WITH redriven AS (
+                DELETE FROM {{queue.DeadLetterTable}}
+                WHERE "queue" = $3
+                  AND {{OriginalTopic}} = $2
+                  AND "visible_timeout" < CURRENT_TIMESTAMP - $4
+                  AND {{CreatedAt}} >= CURRENT_TIMESTAMP - $5
+                RETURNING "content"
+            )
+            INSERT INTO {{queue.SourceTable}} ("visible_timeout", "queue", "content")
+            SELECT
+                CURRENT_TIMESTAMP,
+                $1,
+                (
                     jsonb_set(
                         jsonb_set("content"::jsonb, '{header,handledCount}', '0'),
                         '{header,topic}',
                         to_jsonb($2::text)
                     ){{StripRejectionMetadata}}
-                )::{{queue.ContentType}}
-            WHERE "queue" = $3
-              AND {{OriginalTopic}} = $2
-              AND "visible_timeout" < CURRENT_TIMESTAMP - $4
-              AND {{CreatedAt}} >= CURRENT_TIMESTAMP - $5
+                )::{{queue.SourceContentType}}
+            FROM redriven
             """,
             connection
         )
@@ -122,7 +130,7 @@ internal sealed class PostgresDeadLetterService : PeriodicService
         await using var abandoned = new NpgsqlCommand(
             $"""
             SELECT count(*)::int
-            FROM {queue.Table}
+            FROM {queue.DeadLetterTable}
             WHERE "queue" = $1
               AND {OriginalTopic} = $2
               AND ({CreatedAt} < CURRENT_TIMESTAMP - $3 OR {CreatedAt} IS NULL)
@@ -157,7 +165,7 @@ internal sealed class PostgresDeadLetterService : PeriodicService
     {
         await using var expire = new NpgsqlCommand(
             $"""
-            DELETE FROM {queue.Table}
+            DELETE FROM {queue.DeadLetterTable}
             WHERE "queue" = $1
               AND {OriginalTopic} = $2
               AND "visible_timeout" < CURRENT_TIMESTAMP - $3
@@ -207,29 +215,32 @@ internal sealed class PostgresDeadLetterService : PeriodicService
             ?? throw new InvalidOperationException(
                 $"{requestType.Name} has a dead-letter policy, but its subscription has no dead-letter routing key."
             );
-        var schema = PostgresIdentifier.Validate(
-            subscription.SchemaName ?? gateway.SchemaName ?? "public"
-        );
-        var table = PostgresIdentifier.Validate(
-            subscription.QueueStoreTable ?? gateway.QueueStoreTable
-        );
         var binary = subscription.BinaryMessagePayload ?? gateway.BinaryMessagePayload;
         return new DeadLetterQueue(
             requestType,
             policy,
-            Table: $"\"{schema}\".\"{table}\"",
-            ContentType: binary ? "jsonb" : "json",
+            DeadLetterTable: QueueTable(gateway.SchemaName, gateway.QueueStoreTable),
+            SourceTable: QueueTable(
+                subscription.SchemaName ?? gateway.SchemaName,
+                subscription.QueueStoreTable ?? gateway.QueueStoreTable
+            ),
+            SourceContentType: binary ? "jsonb" : "json",
             DeadLetters: deadLetters,
             Source: subscription.ChannelName.Value,
             Topic: subscription.RoutingKey.Value
         );
     }
 
+    /// <summary>Names a queue table the way Brighter's transport does: quoted as given.</summary>
+    private static string QueueTable(string? schema, string table) =>
+        $"\"{PostgresIdentifier.Validate(schema ?? "public")}\".\"{PostgresIdentifier.Validate(table)}\"";
+
     private sealed record DeadLetterQueue(
         Type RequestType,
         DeadLetterPolicy Policy,
-        string Table,
-        string ContentType,
+        string DeadLetterTable,
+        string SourceTable,
+        string SourceContentType,
         string DeadLetters,
         string Source,
         string Topic

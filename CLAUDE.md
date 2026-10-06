@@ -8,7 +8,7 @@ A class library that fixes or adds to parts of Paramore Brighter on PostgreSQL, 
 
 - Public API is the four `Use…` builder extensions and their options classes. Everything else is `internal`. `PublicAPI.Unshipped.txt` must list every public symbol (RS0016 fails the build).
 - Table and schema names reach SQL only through `PostgresIdentifier.Validate`.
-- Name tables the way the Brighter component that owns them does: the inbox lower-cases and quotes; the transport quotes as given, under schema `public` by default.
+- Name tables the way the Brighter component that owns them does: the inbox's queries lower-case, quote and don't qualify (they ignore `SchemaName`); the transport quotes as given, under schema `public` by default.
 - SQL measures age with `CURRENT_TIMESTAMP`, not the app's clock, because Brighter stamps the transport's `visible_timeout` with the database clock. The inbox cleaner does the same for consistency; its retention is measured in days, so clock skew doesn't matter there.
 - `INVARIANTS.md` lists the rules a reasonable-looking change could break. Read it before touching the lock key, the sweeper's lock resource or the dead-letter SQL.
 

@@ -15,7 +15,7 @@ internal sealed class PostgresInboxCleaner(
     ILogger<PostgresInboxCleaner> logger
 ) : PeriodicService(options.Interval, options.Interval, logger)
 {
-    private readonly string table = Qualified(inbox);
+    private readonly string table = TableName(inbox);
 
     protected override string Activity => "clear old inbox rows";
 
@@ -67,12 +67,11 @@ internal sealed class PostgresInboxCleaner(
         }
     }
 
-    /// <summary>Names the table the way Brighter's inbox does: lower-cased and quoted.</summary>
-    private static string Qualified(IAmARelationalDatabaseConfiguration inbox)
-    {
-        var table = $"\"{PostgresIdentifier.Validate(inbox.InBoxTableName).ToLowerInvariant()}\"";
-        return inbox.SchemaName is null
-            ? table
-            : $"\"{PostgresIdentifier.Validate(inbox.SchemaName).ToLowerInvariant()}\".{table}";
-    }
+    /// <summary>
+    /// Names the table the way Brighter's inbox queries do: lower-cased, quoted and unqualified, so
+    /// it resolves through the connection's <c>search_path</c>. Those queries ignore the
+    /// configuration's <c>SchemaName</c>, so this does too, to clean the table Brighter writes to.
+    /// </summary>
+    private static string TableName(IAmARelationalDatabaseConfiguration inbox) =>
+        $"\"{PostgresIdentifier.Validate(inbox.InBoxTableName).ToLowerInvariant()}\"";
 }

@@ -11,13 +11,17 @@ namespace Meridian.Brighter.Postgres.Tests;
 [Collection("Postgres")]
 public sealed class PostgresInboxCleanerTests(PostgresFixture postgres)
 {
-    [Fact]
-    public async Task RowsPastRetentionAreDeletedInBatchesAndRecentRowsAreKept()
+    // Brighter's inbox queries ignore SchemaName, so the cleaner must too: "elsewhere" doesn't exist.
+    [Theory]
+    [InlineData(null)]
+    [InlineData("elsewhere")]
+    public async Task RowsPastRetentionAreDeletedInBatchesAndRecentRowsAreKept(string? schemaName)
     {
         // Mixed case, as apps configure it; Brighter folds it to lower case.
         var configuration = new RelationalDatabaseConfiguration(
             postgres.ConnectionString,
-            inboxTableName: $"Inbox_{Guid.NewGuid():N}"
+            inboxTableName: $"Inbox_{Guid.NewGuid():N}",
+            schemaName: schemaName
         );
         await ExecuteAsync(PostgreSqlInboxBuilder.GetDDL(configuration.InBoxTableName));
         var inbox = new PostgreSqlInbox(configuration);

@@ -21,3 +21,24 @@
 **Accepts:** a dead letter with no `originalTopic` is never re-driven or expired, so it stays until someone removes it.
 **Owner:** `PostgresDeadLetterService`.
 **Proof:** `PostgresDeadLetterServiceTests.TypesSharingADeadLetterQueueOnlyHaveTheirOwnMessagesActedOn`.
+
+## MBP-DLQ-002 Dead letters are read from the gateway's table, and re-driven into the subscription's
+
+**Rule:** `PostgresDeadLetterService` reads and deletes dead letters in the gateway configuration's schema and queue table, and re-drives each one into its subscription's schema and table (falling back to the configuration's), with the subscription's payload type.
+**Why:** Brighter's consumer creates its dead-letter producer from the gateway configuration alone, so dead letters never land in a subscription's own table. Following the subscription's table override to find them looks right but finds nothing; that was this package's first version.
+**Owner:** `PostgresDeadLetterService.Resolve`.
+**Proof:** `PostgresDeadLetterServiceTests.ARedrivenMessageMovesToTheTableItsSubscriptionReadsFrom`.
+
+## MBP-DLQ-003 A re-drive moves each message exactly once
+
+**Rule:** a re-drive is one statement whose `DELETE … RETURNING` from the dead-letter queue feeds the `INSERT` into the subscription's queue, so only the session that deletes a row inserts it.
+**Why:** replicas run the same policies at the same time. A re-drive that reads the dead letters, inserts them and then deletes them lets two replicas both read and insert the same rows, so every handler runs twice.
+**Owner:** `PostgresDeadLetterService.RedriveAsync`.
+**Proof:** `PostgresDeadLetterServiceTests.TwoReplicasRedrivingAtOnceMoveEachMessageExactlyOnce`, which holds the rows' locks until both replicas are waiting on them.
+
+## MBP-INBOX-001 The cleanup names the inbox table the way Brighter's inbox queries do
+
+**Rule:** `PostgresInboxCleaner` uses the inbox table name lower-cased, quoted and unqualified, ignoring the configuration's `SchemaName`, because Brighter's `PostgreSqlInbox` queries do the same (checked at 10.7.0 and 10.8.0).
+**Why:** only Brighter's DDL helper qualifies the name with the schema, so following it looks right, but it cleans a table Brighter never writes to, or fails when that schema doesn't exist. If Brighter starts qualifying its queries, change this to match.
+**Owner:** `PostgresInboxCleaner.TableName`.
+**Proof:** `PostgresInboxCleanerTests.RowsPastRetentionAreDeletedInBatchesAndRecentRowsAreKept`, with `schemaName: "elsewhere"`.

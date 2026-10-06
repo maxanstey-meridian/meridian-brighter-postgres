@@ -12,8 +12,10 @@ public sealed class Notify() : Command(Id.Random());
 
 /// <summary>
 /// Brighter's PostgreSQL transport in its own queue table, with a subscription per message type
-/// that dead-letters to its own queue, or to one queue they share. Messages reach the dead-letter
-/// queue the way they do in production: received by Brighter's consumer and rejected.
+/// that dead-letters to its own queue, or to one queue they share. Subscriptions can read from
+/// tables of their own, with the other payload type, and the configuration can name a schema.
+/// Messages reach the dead-letter queue the way they do in production: received by Brighter's
+/// consumer and rejected.
 /// </summary>
 internal sealed class DeadLetterQueue
 {
@@ -23,15 +25,28 @@ internal sealed class DeadLetterQueue
     public DeadLetterQueue(
         string connectionString,
         bool binaryMessagePayload,
-        bool sharedDeadLetterQueue = false
+        bool sharedDeadLetterQueue = false,
+        bool subscriptionsHaveOwnTables = false,
+        string? schemaName = null
     )
     {
         this.connectionString = connectionString;
         Gateway = new RelationalDatabaseConfiguration(
             connectionString,
             queueStoreTable: $"queue_{Guid.NewGuid():N}",
+            schemaName: schemaName,
             binaryMessagePayload: binaryMessagePayload
         );
+        if (schemaName is not null)
+        {
+            using var connection = new NpgsqlConnection(connectionString);
+            connection.Open();
+            using var create = new NpgsqlCommand(
+                $"""CREATE SCHEMA IF NOT EXISTS "{schemaName}" """,
+                connection
+            );
+            create.ExecuteNonQuery();
+        }
         foreach (var type in new[] { typeof(Erase), typeof(Notify) })
         {
             subscriptions[type] = new PostgresSubscription(
@@ -42,10 +57,26 @@ internal sealed class DeadLetterQueue
                 messagePumpType: MessagePumpType.Reactor,
                 deadLetterRoutingKey: new RoutingKey(
                     sharedDeadLetterQueue ? "shared.dlq" : $"{type.Name.ToLowerInvariant()}.dlq"
-                )
+                ),
+                queueStoreTable: subscriptionsHaveOwnTables
+                    ? $"{Gateway.QueueStoreTable}_{type.Name.ToLowerInvariant()}"
+                    : null,
+                binaryMessagePayload: subscriptionsHaveOwnTables ? !binaryMessagePayload : null
             );
         }
         var channels = new PostgresChannelFactory(new PostgresMessagingGatewayConnection(Gateway));
+        // Brighter writes dead letters to the gateway's table, which no subscription here may create.
+        channels
+            .CreateSyncChannel(
+                new PostgresSubscription(
+                    new SubscriptionName("gateway"),
+                    new ChannelName("gateway"),
+                    new RoutingKey("gateway"),
+                    dataType: typeof(Erase),
+                    messagePumpType: MessagePumpType.Reactor
+                )
+            )
+            .Dispose();
         foreach (var subscription in subscriptions.Values)
         {
             channels.CreateSyncChannel(subscription).Dispose();
@@ -53,6 +84,10 @@ internal sealed class DeadLetterQueue
     }
 
     public RelationalDatabaseConfiguration Gateway { get; }
+
+    /// <summary>The table Brighter writes dead letters to: the configuration's.</summary>
+    public string DeadLetterTable =>
+        $"\"{Gateway.SchemaName ?? "public"}\".\"{Gateway.QueueStoreTable}\"";
 
     public CollectingLoggerProvider Logs { get; } = new();
 
@@ -88,11 +123,21 @@ internal sealed class DeadLetterQueue
         );
         using var producer = new PostgresMessageProducer(
             Gateway,
-            new PostgresPublication { Topic = subscription.RoutingKey }
+            new PostgresPublication
+            {
+                Topic = subscription.RoutingKey,
+                QueueStoreTable = subscription.QueueStoreTable,
+                BinaryMessagePayload = subscription.BinaryMessagePayload,
+            }
         );
         producer.Send(message);
+        return RejectFromSource<T>();
+    }
 
-        using var consumer = Consumer(subscription);
+    /// <summary>Receives the next message on <typeparamref name="T"/>'s queue and rejects it.</summary>
+    public Message RejectFromSource<T>()
+    {
+        using var consumer = Consumer(subscriptions[typeof(T)]);
         var received = Receive(consumer);
         consumer.Reject(
             received,
@@ -117,7 +162,7 @@ internal sealed class DeadLetterQueue
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync();
         await using var count = new NpgsqlCommand(
-            $"""SELECT count(*)::int FROM "public"."{Gateway.QueueStoreTable}" WHERE "queue" = $1""",
+            $"""SELECT count(*)::int FROM {DeadLetterTable} WHERE "queue" = $1""",
             connection
         )
         {

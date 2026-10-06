@@ -1,1 +1,35 @@
 #nullable enable
+Meridian.Brighter.Postgres.BrighterBuilderExtensions
+Meridian.Brighter.Postgres.PostgresDeadLetterOptions
+Meridian.Brighter.Postgres.PostgresDeadLetterOptions.Expire<TRequest>(System.TimeSpan after) -> Meridian.Brighter.Postgres.PostgresDeadLetterOptions!
+Meridian.Brighter.Postgres.PostgresDeadLetterOptions.Interval.get -> System.TimeSpan
+Meridian.Brighter.Postgres.PostgresDeadLetterOptions.Interval.set -> void
+Meridian.Brighter.Postgres.PostgresDeadLetterOptions.PostgresDeadLetterOptions() -> void
+Meridian.Brighter.Postgres.PostgresDeadLetterOptions.Redrive<TRequest>(System.TimeSpan after, System.TimeSpan giveUpAfter) -> Meridian.Brighter.Postgres.PostgresDeadLetterOptions!
+Meridian.Brighter.Postgres.PostgresInboxCleaner
+Meridian.Brighter.Postgres.PostgresInboxCleanupOptions
+Meridian.Brighter.Postgres.PostgresInboxCleanupOptions.BatchSize.get -> int
+Meridian.Brighter.Postgres.PostgresInboxCleanupOptions.BatchSize.set -> void
+Meridian.Brighter.Postgres.PostgresInboxCleanupOptions.Interval.get -> System.TimeSpan
+Meridian.Brighter.Postgres.PostgresInboxCleanupOptions.Interval.set -> void
+Meridian.Brighter.Postgres.PostgresInboxCleanupOptions.PostgresInboxCleanupOptions() -> void
+Meridian.Brighter.Postgres.PostgresInboxCleanupOptions.RetainFor.get -> System.TimeSpan
+Meridian.Brighter.Postgres.PostgresInboxCleanupOptions.RetainFor.set -> void
+Meridian.Brighter.Postgres.ResilientOutboxSweeper
+Meridian.Brighter.Postgres.ResilientOutboxSweeper.ResilientOutboxSweeper(Paramore.Brighter.IAmAnOutboxProducerMediator! mediator, Paramore.Brighter.IAmAProducerRegistry! producers, Paramore.Brighter.IDistributedLock! distributedLock, Meridian.Brighter.Postgres.ResilientOutboxSweeperOptions! options, Microsoft.Extensions.Logging.ILogger<Meridian.Brighter.Postgres.ResilientOutboxSweeper!>! logger) -> void
+Meridian.Brighter.Postgres.ResilientOutboxSweeperOptions
+Meridian.Brighter.Postgres.ResilientOutboxSweeperOptions.BatchSize.get -> int
+Meridian.Brighter.Postgres.ResilientOutboxSweeperOptions.BatchSize.set -> void
+Meridian.Brighter.Postgres.ResilientOutboxSweeperOptions.Interval.get -> System.TimeSpan
+Meridian.Brighter.Postgres.ResilientOutboxSweeperOptions.Interval.set -> void
+Meridian.Brighter.Postgres.ResilientOutboxSweeperOptions.MaximumBackoff.get -> System.TimeSpan
+Meridian.Brighter.Postgres.ResilientOutboxSweeperOptions.MaximumBackoff.set -> void
+Meridian.Brighter.Postgres.ResilientOutboxSweeperOptions.MinimumMessageAge.get -> System.TimeSpan
+Meridian.Brighter.Postgres.ResilientOutboxSweeperOptions.MinimumMessageAge.set -> void
+Meridian.Brighter.Postgres.ResilientOutboxSweeperOptions.ResilientOutboxSweeperOptions() -> void
+Meridian.Brighter.Postgres.ResilientOutboxSweeperOptions.UseBulk.get -> bool
+Meridian.Brighter.Postgres.ResilientOutboxSweeperOptions.UseBulk.set -> void
+static Meridian.Brighter.Postgres.BrighterBuilderExtensions.UsePostgresAdvisoryLock(this Paramore.Brighter.Extensions.DependencyInjection.IBrighterBuilder! brighter, string! connectionString) -> Paramore.Brighter.Extensions.DependencyInjection.IBrighterBuilder!
+static Meridian.Brighter.Postgres.BrighterBuilderExtensions.UsePostgresDeadLetters(this Paramore.Brighter.Extensions.DependencyInjection.IBrighterBuilder! brighter, Paramore.Brighter.IAmARelationalDatabaseConfiguration! gateway, System.Action<Meridian.Brighter.Postgres.PostgresDeadLetterOptions!>! configure) -> Paramore.Brighter.Extensions.DependencyInjection.IBrighterBuilder!
+static Meridian.Brighter.Postgres.BrighterBuilderExtensions.UsePostgresInboxCleanup(this Paramore.Brighter.Extensions.DependencyInjection.IBrighterBuilder! brighter, Paramore.Brighter.IAmARelationalDatabaseConfiguration! inbox, System.Action<Meridian.Brighter.Postgres.PostgresInboxCleanupOptions!>? configure = null) -> Paramore.Brighter.Extensions.DependencyInjection.IBrighterBuilder!
+static Meridian.Brighter.Postgres.BrighterBuilderExtensions.UseResilientOutboxSweeper(this Paramore.Brighter.Extensions.DependencyInjection.IBrighterBuilder! brighter, System.Action<Meridian.Brighter.Postgres.ResilientOutboxSweeperOptions!>? configure = null) -> Paramore.Brighter.Extensions.DependencyInjection.IBrighterBuilder!

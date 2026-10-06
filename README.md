@@ -108,14 +108,13 @@ Each extension relies on part of Brighter being registered:
 | `UsePostgresInboxCleanup`   | Only the inbox's configuration                                                  |
 
 The sweeper, the dead-letter policies and the inbox cleanup are hosted services. Each runs its
-first pass as soon as the host starts, then one every `Interval`. Register the sweeper once; each
-`UsePostgresDeadLetters` or `UsePostgresInboxCleanup` call runs a service of its own, so an app
-with two inboxes calls `UsePostgresInboxCleanup` for each.
+first pass as soon as the host starts, then one every `Interval`. Call each `Use…` once; the
+dead-letter call takes every type's policy.
 
 Bad settings fail early. An out-of-range interval, age or batch size throws
 `ArgumentOutOfRangeException` from the `Use…` call itself. Intervals and `MaximumBackoff` can't be
 longer than about 49 days, the longest wait `Task.Delay` accepts. A second policy for the same
-type, or a second `UseResilientOutboxSweeper` call, throws `InvalidOperationException` there too.
+type, or a second call to any `Use…`, throws `InvalidOperationException` there too.
 Problems that depend on the rest of the container throw `InvalidOperationException` when the host
 starts:
 
@@ -240,6 +239,9 @@ already deleting (`FOR UPDATE SKIP LOCKED`), so replicas can run it side by side
 
 `RetainFor` is also how long a duplicate is recognised. A copy of a command that arrives after its
 row has gone is handled again, so keep it well past the longest time a message could be redelivered.
+
+The cleaner is the hosted service `PostgresInboxCleaner`, registered with a factory, so a host
+finds it among the resolved hosted services rather than by its descriptor's `ImplementationType`.
 
 | Option      | Default | Meaning                                       |
 | ----------- | ------- | --------------------------------------------- |

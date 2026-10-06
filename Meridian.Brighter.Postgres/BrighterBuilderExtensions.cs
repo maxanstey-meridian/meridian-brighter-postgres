@@ -41,17 +41,10 @@ public static class BrighterBuilderExtensions
         Action<ResilientOutboxSweeperOptions>? configure = null
     )
     {
-        if (
-            brighter.Services.Any(descriptor =>
-                descriptor.ServiceType == typeof(ResilientOutboxSweeperOptions)
-            )
-        )
-        {
-            throw new InvalidOperationException(
-                $"{nameof(UseResilientOutboxSweeper)} has already been called."
-            );
-        }
-
+        ThrowIfRegistered<ResilientOutboxSweeperOptions>(
+            brighter,
+            nameof(UseResilientOutboxSweeper)
+        );
         var options = new ResilientOutboxSweeperOptions();
         configure?.Invoke(options);
         options.Validate();
@@ -65,7 +58,7 @@ public static class BrighterBuilderExtensions
     /// Applies a dead-letter policy per message type on Brighter's PostgreSQL transport: re-drive
     /// some, expire others, and keep the rest. Each type needs one PostgreSQL subscription with a
     /// dead-letter routing key. Pass the configuration the transport's connection uses, so the
-    /// queue table, schema and payload type match. Each call runs its own service.
+    /// queue table, schema and payload type match. Call it once, with every type's policy.
     /// </summary>
     public static IBrighterBuilder UsePostgresDeadLetters(
         this IBrighterBuilder brighter,
@@ -74,11 +67,13 @@ public static class BrighterBuilderExtensions
     )
     {
         ArgumentNullException.ThrowIfNull(gateway);
+        ThrowIfRegistered<PostgresDeadLetterOptions>(brighter, nameof(UsePostgresDeadLetters));
         var options = new PostgresDeadLetterOptions();
         configure(options);
         options.Validate();
 
-        brighter.Services.AddSingleton<IHostedService>(provider => new PostgresDeadLetterService(
+        brighter.Services.AddSingleton(options);
+        brighter.Services.AddHostedService(provider => new PostgresDeadLetterService(
             gateway,
             provider.GetRequiredService<IAmConsumerOptions>(),
             options,
@@ -89,7 +84,8 @@ public static class BrighterBuilderExtensions
 
     /// <summary>
     /// Deletes inbox rows past their retention, which Brighter never does. Pass the configuration
-    /// the inbox uses, so the table and schema match. Each call cleans the inbox it is given.
+    /// the inbox uses, so the table and schema match. Call it once. The cleaner is registered with
+    /// a factory, so a host recognises it among the resolved hosted services, not by descriptor.
     /// </summary>
     public static IBrighterBuilder UsePostgresInboxCleanup(
         this IBrighterBuilder brighter,
@@ -98,15 +94,26 @@ public static class BrighterBuilderExtensions
     )
     {
         ArgumentNullException.ThrowIfNull(inbox);
+        ThrowIfRegistered<PostgresInboxCleanupOptions>(brighter, nameof(UsePostgresInboxCleanup));
         var options = new PostgresInboxCleanupOptions();
         configure?.Invoke(options);
         options.Validate();
 
-        brighter.Services.AddSingleton<IHostedService>(provider => new PostgresInboxCleaner(
+        brighter.Services.AddSingleton(options);
+        brighter.Services.AddHostedService(provider => new PostgresInboxCleaner(
             inbox,
             options,
             provider.GetRequiredService<ILogger<PostgresInboxCleaner>>()
         ));
         return brighter;
+    }
+
+    /// <summary>Each <c>Use…</c> registers its options, so a second call is caught here.</summary>
+    private static void ThrowIfRegistered<TOptions>(IBrighterBuilder brighter, string method)
+    {
+        if (brighter.Services.Any(descriptor => descriptor.ServiceType == typeof(TOptions)))
+        {
+            throw new InvalidOperationException($"{method} has already been called.");
+        }
     }
 }

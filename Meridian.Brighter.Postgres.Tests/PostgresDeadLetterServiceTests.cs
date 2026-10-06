@@ -4,6 +4,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using Paramore.Brighter;
+using Paramore.Brighter.Extensions.DependencyInjection;
 using Paramore.Brighter.MessagingGateway.Postgres;
 using Paramore.Brighter.ServiceActivator.Extensions.DependencyInjection;
 
@@ -356,6 +357,22 @@ public sealed class PostgresDeadLetterServiceTests(PostgresFixture postgres)
 
         Assert.Throws<InvalidOperationException>(() =>
             options.Redrive<Notify>(TimeSpan.Zero, TimeSpan.FromDays(1))
+        );
+    }
+
+    [Fact]
+    public void PoliciesCanOnlyBeRegisteredOnce()
+    {
+        var gateway = new RelationalDatabaseConfiguration(postgres.ConnectionString);
+        var brighter = new ServiceCollection()
+            .AddBrighter()
+            .UsePostgresDeadLetters(gateway, options => options.Expire<Notify>(TimeSpan.Zero));
+
+        Assert.Throws<InvalidOperationException>(() =>
+            brighter.UsePostgresDeadLetters(
+                gateway,
+                options => options.Redrive<Notify>(TimeSpan.Zero, TimeSpan.FromDays(1))
+            )
         );
     }
 }

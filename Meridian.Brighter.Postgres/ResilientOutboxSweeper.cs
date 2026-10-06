@@ -18,12 +18,15 @@ public sealed class ResilientOutboxSweeper : BackgroundService
 
     private readonly IAmAnOutboxProducerMediator mediator;
     private readonly IDistributedLock distributedLock;
-    private readonly ResilientOutboxSweeperOptions options;
+    private readonly int batchSize;
+    private readonly TimeSpan minimumMessageAge;
+    private readonly bool useBulk;
     private readonly PeriodicLoop loop;
 
     /// <summary>
-    /// Creates the sweeper. Throws if the options are out of range, or if they ask for bulk sends
-    /// and a producer has no bulk API.
+    /// Creates the sweeper, for the container to call. Throws if the options are out of range, or
+    /// if they ask for bulk sends and a producer has no bulk API. Later changes to the options
+    /// have no effect.
     /// </summary>
     public ResilientOutboxSweeper(
         IAmAnOutboxProducerMediator mediator,
@@ -38,19 +41,21 @@ public sealed class ResilientOutboxSweeper : BackgroundService
         {
             var unbatched = producers
                 .Producers.Where(producer => producer is not IAmABulkMessageProducerAsync)
-                .Select(producer => producer.Publication.Topic?.Value)
+                .Select(producer => $"{producer.Publication.Topic} ({producer.GetType().Name})")
                 .ToList();
             if (unbatched.Count > 0)
             {
                 throw new InvalidOperationException(
-                    $"UseBulk sends through each producer's bulk API, but the producers for {string.Join(", ", unbatched)} have none."
+                    $"UseBulk sends through each producer's bulk API, but these have none: {string.Join(", ", unbatched)}."
                 );
             }
         }
 
         this.mediator = mediator;
         this.distributedLock = distributedLock;
-        this.options = options;
+        batchSize = options.BatchSize;
+        minimumMessageAge = options.MinimumMessageAge;
+        useBulk = options.UseBulk;
         loop = new PeriodicLoop(
             options.Interval,
             options.MaximumBackoff,
@@ -75,9 +80,9 @@ public sealed class ResilientOutboxSweeper : BackgroundService
         try
         {
             await mediator.ClearOutstandingFromOutboxAsync(
-                options.BatchSize,
-                options.MinimumMessageAge,
-                options.UseBulk,
+                batchSize,
+                minimumMessageAge,
+                useBulk,
                 new RequestContext(),
                 cancellationToken: cancellationToken
             );

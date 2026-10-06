@@ -58,24 +58,25 @@ public sealed class PostgresInboxCleanerTests(PostgresFixture postgres)
     }
 
     [Fact]
-    public async Task EachRegistrationAddsACleanerForItsInbox()
+    public async Task RegisteringCleanupAddsTheCleaner()
     {
         var services = new ServiceCollection().AddLogging();
-        services
-            .AddBrighter()
-            .UsePostgresInboxCleanup(
-                new RelationalDatabaseConfiguration(postgres.ConnectionString, inboxTableName: "a")
-            )
-            .UsePostgresInboxCleanup(
-                new RelationalDatabaseConfiguration(postgres.ConnectionString, inboxTableName: "b")
-            );
+        services.AddBrighter().UsePostgresInboxCleanup(Inbox());
         await using var provider = services.BuildServiceProvider();
 
-        Assert.Equal(
-            2,
-            provider.GetServices<IHostedService>().OfType<PostgresInboxCleaner>().Count()
-        );
+        Assert.Single(provider.GetServices<IHostedService>().OfType<PostgresInboxCleaner>());
     }
+
+    [Fact]
+    public void CleanupCanOnlyBeRegisteredOnce()
+    {
+        var brighter = new ServiceCollection().AddBrighter().UsePostgresInboxCleanup(Inbox());
+
+        Assert.Throws<InvalidOperationException>(() => brighter.UsePostgresInboxCleanup(Inbox()));
+    }
+
+    private RelationalDatabaseConfiguration Inbox() =>
+        new(postgres.ConnectionString, inboxTableName: "inbox");
 
     private async Task ExecuteAsync(string sql)
     {
